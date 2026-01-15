@@ -90,6 +90,12 @@ const BioLens = () => {
       }
   }, [spin]);
 
+  // Helper: Detect format from filename/url
+  const getFormat = (str) => {
+      const lower = str.toLowerCase();
+      if (lower.endsWith('.cif') || lower.endsWith('.mmcif')) return 'mmcif';
+      return 'pdb'; // Default to pdb for .ent or .pdb
+  };
 
   const loadPdbFromUrl = async (url) => {
     setLoading(true);
@@ -99,14 +105,14 @@ const BioLens = () => {
     try {
         await plugin.clear();
         
+        const format = getFormat(url);
+        
         // Mol* loading sequence
         const data = await plugin.builders.data.download({ url: url }, { state: { isGhost: true } });
-        const trajectory = await plugin.builders.structure.parseTrajectory(data, "pdb");
+        const trajectory = await plugin.builders.structure.parseTrajectory(data, format);
         const model = await plugin.builders.structure.createModel(trajectory);
         const structure = await plugin.builders.structure.createStructure(model);
         
-        // Save structure ref for later styling
-        // Initial style application happens via useEffect
         setLoading(false);
         
         // Auto focus
@@ -123,22 +129,29 @@ const BioLens = () => {
     if (!file) return;
     setFileName(file.name);
     setLoading(true);
+    setError(null);
 
     const plugin = pluginRef.current;
     if(!plugin) return;
 
     try {
         await plugin.clear();
+        
+        // Determine format
+        const format = getFormat(file.name);
+        console.log(`Loading file: ${file.name} as ${format}`);
+
         // Open file using Mol* built-in opener logic or data provider
         const data = await plugin.builders.data.readFile({ file, label: file.name });
-        const trajectory = await plugin.builders.structure.parseTrajectory(data, "pdb"); // Assuming PDB for now
+        const trajectory = await plugin.builders.structure.parseTrajectory(data, format);
         const model = await plugin.builders.structure.createModel(trajectory);
         const structure = await plugin.builders.structure.createStructure(model);
         
         setLoading(false);
         plugin.managers.camera.reset();
     } catch(err) {
-        setError("Error reading file.");
+        console.error(err);
+        setError(`Error reading file. Make sure it is a valid ${getFormat(file.name).toUpperCase()}.`);
         setLoading(false);
     }
   };
@@ -149,8 +162,8 @@ const BioLens = () => {
       if (!plugin) return;
 
       const managers = plugin.managers;
+      if (!managers.structure.hierarchy.current.structures[0]) return;
       const structure = managers.structure.hierarchy.current.structures[0];
-      if(!structure) return;
 
       // 1. Clear current representations
       await managers.structure.component.clear(structure.cell);
@@ -159,15 +172,14 @@ const BioLens = () => {
       const canvas = plugin.canvas3d;
       if(canvas) {
           let bgColor = 0xffffff; // White
-          let lighting = 'matte'; // Simplified logic
           
           if(currentStyle === 'journal_nature') bgColor = 0xffffff;
           if(currentStyle === 'journal_cell') bgColor = 0xfdfbf7;
           if(currentStyle === 'hologram') bgColor = 0x000000;
           if(currentStyle === 'glass') bgColor = 0x111111;
+          if(currentStyle === 'xray') bgColor = 0x000000;
           
           // Apply background
-          // Note: Mol* color uses 0xRRGGBB format
           const renderer = canvas.props.renderer;
           plugin.canvas3d.setProps({ renderer: { ...renderer, backgroundColor: bgColor } });
       }
@@ -180,39 +192,74 @@ const BioLens = () => {
           label: 'Polymer'
       });
 
-      // Style Params
+      // Style Params defaults
       let cartoonParams = {}; 
-      if(currentStyle === 'journal_cell') {
-          cartoonParams = { sizeFactor: 0.4 }; // Puttier
-      }
-
-      // Color Theme
-      let colorTheme = 'chain-id';
-      let colorParams = {};
       
-      // Custom color override
-      if(customColor) {
-         // Converting hex to Mol* color is complex in simplified view
-         // For MVP, we stick to chain-id or element, custom color requires creating a custom theme
-         // or using 'uniform' coloring with the specific color.
-         // Let's implement uniform color override if user requested specific override logic
-         // For now, we stick to presets for stability in MVP
-      }
-
       // Add Representation based on style
-      if(currentStyle === 'glass') {
-          await managers.structure.representation.addRepresentation(polymer, {
-              type: 'spacefill', // Glass balls
-              typeParams: { ignoreLight: true, opacity: 0.4 }, // Fake glass
+      if(currentStyle === 'journal_cell') {
+           // Soft, putty-like
+           await managers.structure.representation.addRepresentation(polymer, {
+              type: 'cartoon',
+              typeParams: { sizeFactor: 0.4 }, // Thicker
               color: 'chain-id'
           });
-          // Add cartoon inside
+          // Add soft surface
+          await managers.structure.representation.addRepresentation(polymer, {
+              type: 'gaussian-surface',
+              typeParams: { ignoreLight: false, alpha: 0.3 },
+              color: 'chain-id'
+          });
+
+      } else if(currentStyle === 'glass') {
+          // Glass balls
+          await managers.structure.representation.addRepresentation(polymer, {
+              type: 'spacefill', 
+              typeParams: { ignoreLight: false, alpha: 0.3, sizeFactor: 1.1 }, 
+              color: 'chain-id' // Or uniform if customColor logic added
+          });
+          // Solid spine
           await managers.structure.representation.addRepresentation(polymer, {
               type: 'cartoon',
               color: 'chain-id'
           });
+
+      } else if(currentStyle === 'hologram') {
+          // Neon glow lines
+          await managers.structure.representation.addRepresentation(polymer, {
+              type: 'cartoon', // Base shape
+              typeParams: { sizeFactor: 0.1 }, // Thin
+              color: 'uniform',
+              colorParams: { value: 0x00ffcc } // Cyan
+          });
+          await managers.structure.representation.addRepresentation(polymer, {
+              type: 'ball-and-stick',
+              typeParams: { sizeFactor: 0.1 },
+              color: 'uniform',
+              colorParams: { value: 0x00aa88 }
+          });
+
+      } else if(currentStyle === 'xray') {
+          // X-Ray / Blueprint look
+          await managers.structure.representation.addRepresentation(polymer, {
+              type: 'molecular-surface',
+              typeParams: { 
+                  alpha: 0.15, 
+                  flatShaded: true, 
+                  doubleSided: true,
+                  ignoreLight: true 
+              }, 
+              color: 'uniform',
+              colorParams: { value: 0xffffff }
+          });
+          await managers.structure.representation.addRepresentation(polymer, {
+              type: 'cartoon',
+              typeParams: { sizeFactor: 0.2 },
+              color: 'uniform',
+              colorParams: { value: 0xffffff }
+          });
+
       } else {
-          // Standard Cartoon
+          // Default: Journal Nature (Standard Cartoon)
           await managers.structure.representation.addRepresentation(polymer, {
               type: 'cartoon',
               typeParams: cartoonParams,
@@ -221,7 +268,6 @@ const BioLens = () => {
       }
 
       // -- Ligands --
-      // Mol* is great at finding ligands automatically
       const ligand = await managers.structure.component.add({
           selection: managers.structure.selection.fromSelectionQuery('ligand'),
           label: 'Ligand'
@@ -230,17 +276,16 @@ const BioLens = () => {
       await managers.structure.representation.addRepresentation(ligand, {
           type: 'ball-and-stick',
           color: 'element-symbol',
-          typeParams: { sizeFactor: 0.3 }
+          typeParams: { sizeFactor: 0.35 }
       });
 
-      // -- Interactions / H-Bonds (The "Synthetic Bio" Feature) --
+      // -- Interactions / H-Bonds --
       if (showInteractions) {
-          // Mol* has a helper for this
           await managers.structure.representation.addRepresentation(structure, {
              type: 'interactions',
              typeParams: { 
                  lineSizeFactor: 0.2,
-                 includeCovalent: false // Only non-covalent (H-bonds, salt bridges)
+                 includeCovalent: false 
              },
              color: 'interaction-type'
           });
@@ -248,14 +293,9 @@ const BioLens = () => {
 
       // -- Focus Mode adjustments --
       if (focusMode === 'binder') {
-           // Focus camera on ligands
            const loci = managers.structure.selection.getLoci(ligand.cell.obj.data);
            plugin.managers.camera.focusLoci(loci);
-           
-           // Make polymer transparent
-           // (Requires updating the polymer representation we just added, omitted for MVP brevity)
       } else {
-           // Reset focus
            plugin.managers.camera.reset();
       }
   };
@@ -296,6 +336,7 @@ const BioLens = () => {
     { id: 'journal_cell', name: 'Cell', icon: Disc },
     { id: 'glass', name: 'Glass', icon: Box },
     { id: 'hologram', name: 'Holo', icon: Monitor },
+    { id: 'xray', name: 'X-Ray', icon: Ghost }, // Added back
   ];
 
   return (
@@ -316,8 +357,8 @@ const BioLens = () => {
         <div className="flex items-center gap-4">
            <label className="flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md cursor-pointer transition-colors shadow-sm">
              <Upload size={16} />
-             <span className="text-sm font-medium">Upload PDB</span>
-             <input type="file" accept=".pdb,.cif" onChange={handleFileUpload} className="hidden" />
+             <span className="text-sm font-medium">Upload File</span>
+             <input type="file" accept=".pdb,.cif,.ent,.mmcif" onChange={handleFileUpload} className="hidden" />
            </label>
         </div>
       </div>
