@@ -2,42 +2,66 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Camera, Sun, Layers, Maximize, Upload, Download, Zap, Droplet, Box, 
   AlertCircle, Play, Pause, Grid, Scissors, Eye, Disc, Activity, Monitor, Ghost,
-  MessageSquare, Mic, Send, Share2
+  MessageSquare, Mic, Send, Share2, RefreshCw, Search
 } from 'lucide-react';
+
+const loadScript = (src) => {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const script = document.createElement('script');
+    script.src = src;
+    script.onload = () => resolve();
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+};
+
+const loadStyle = (href) => {
+  if (document.querySelector(`link[href="${href}"]`)) return;
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = href;
+  document.head.appendChild(link);
+};
 
 const BioLens = () => {
   const containerRef = useRef(null);
   const pluginRef = useRef(null);
   
-  // UI State
+  // Data State
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [fileName, setFileName] = useState("4hhb.pdb (Hemoglobin)");
+  const [fileName, setFileName] = useState("4hhb.pdb");
+  const [pdbIdInput, setPdbIdInput] = useState("");
   
   // Visualization State
   const [currentStyle, setCurrentStyle] = useState('journal_nature');
   const [focusMode, setFocusMode] = useState('global');
   const [showInteractions, setShowInteractions] = useState(false);
-  const [spin, setSpin] = useState(false);
   
-  // 恢复之前好看的蓝色默认值
+  // Color State
   const [customColor, setCustomColor] = useState("#4f46e5"); 
   const [useCustomColor, setUseCustomColor] = useState(false);
   
   // AI Chat State
   const [aiInput, setAiInput] = useState("");
-  const [aiHistory, setAiHistory] = useState([{role: 'system', text: 'Mol* Engine Ready. Upload a PDB to start.'}]);
+  const [aiHistory, setAiHistory] = useState([{role: 'system', text: 'System Ready.'}]);
 
   useEffect(() => {
     const initViewer = async () => {
-        // 检查 Mol* 资源是否加载
-        if (!window.molstar) {
-            setError("Critical Error: window.molstar is undefined. Please check if index.html includes the Mol* script.");
-            return;
-        }
-
         try {
-            const plugin = await window.molstar.Viewer.create(containerRef.current, {
+            // 1. 加载资源
+            if (!window.molstar) {
+                console.log("Loading Mol* from CDN...");
+                loadStyle("https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.css");
+                await loadScript("https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.js");
+            }
+            if (!window.molstar) throw new Error("Failed to load Mol* engine.");
+
+            await new Promise(r => setTimeout(r, 100));
+
+            // 2. 初始化 Viewer
+            const viewer = await window.molstar.Viewer.create(containerRef.current, {
                 layoutIsExpanded: false,
                 layoutShowControls: false,
                 layoutShowRemoteState: false,
@@ -49,9 +73,9 @@ const BioLens = () => {
                 viewportShowAnimation: false,
             });
             
-            pluginRef.current = plugin;
+            pluginRef.current = viewer;
             
-            // Initial Load
+            // 3. 初始加载
             loadPdbFromUrl("https://files.rcsb.org/download/4hhb.pdb");
 
         } catch (e) {
@@ -61,47 +85,75 @@ const BioLens = () => {
         }
     };
 
-    setTimeout(initViewer, 100);
+    initViewer();
 
     return () => {
-        pluginRef.current?.dispose();
+        try {
+            pluginRef.current?.dispose?.();
+            pluginRef.current?.plugin?.dispose?.();
+        } catch(e) {}
     };
   }, []);
 
-  // 辅助函数：更强壮的格式检测
+  const getPluginContext = () => {
+      const viewer = pluginRef.current;
+      if (!viewer) return null;
+      return viewer.plugin || viewer;
+  };
+
   const getFormat = (str) => {
       if (!str) return 'pdb';
       const lower = str.toLowerCase();
       if (lower.endsWith('.cif') || lower.endsWith('.mmcif')) return 'mmcif';
       if (lower.endsWith('.bcif')) return 'bcif';
-      if (lower.endsWith('.pdb') || lower.endsWith('.ent')) return 'pdb';
-      return 'pdb'; // 默认回退到 pdb
+      return 'pdb'; 
+  };
+
+  // --- 1. 修复 Fetch 功能 ---
+  const handlePdbFetch = async (e) => {
+      e.preventDefault();
+      if (!pdbIdInput || pdbIdInput.length < 4) {
+          alert("请输入有效的 4 位 PDB ID (例如 1CRN)");
+          return;
+      }
+      const id = pdbIdInput.toLowerCase();
+      setFileName(id.toUpperCase());
+      // 优先尝试 .bcif (更小更快)，如果失败 Mol* 可能会报错，这里用 pdb 兼容性好点
+      await loadPdbFromUrl(`https://files.rcsb.org/download/${id}.pdb`);
+      setPdbIdInput("");
   };
 
   const loadPdbFromUrl = async (url) => {
     setLoading(true);
     setError(null);
-    const plugin = pluginRef.current;
-    if(!plugin) return;
+    const ctx = getPluginContext();
+    if(!ctx) return;
 
     try {
-        await plugin.clear();
+        await ctx.clear(); // 清空整个场景
+        
         const format = getFormat(url);
+        console.log(`Downloading ${url}...`);
         
-        const data = await plugin.builders.data.download({ url: url }, { state: { isGhost: true } });
-        const trajectory = await plugin.builders.structure.parseTrajectory(data, format);
-        const model = await plugin.builders.structure.createModel(trajectory);
-        await plugin.builders.structure.createStructure(model);
+        const data = await ctx.builders.data.download({ url: url }, { state: { isGhost: true } });
+        const trajectory = await ctx.builders.structure.parseTrajectory(data, format);
+        const model = await ctx.builders.structure.createModel(trajectory);
+        await ctx.builders.structure.createStructure(model); // 创建基础结构
         
+        // 关键：结构加载后，立即调用 applyStyle 生成视觉效果
+        // 不传递参数，让 applyStyle 自动获取 hierarchy 中的结构 wrapper (解决 .components undefined 问题)
+        await applyStyle(); 
+        
+        ctx.managers.camera.reset();
         setLoading(false);
-        plugin.managers.camera.reset();
     } catch (e) {
         console.error("Download Error:", e);
-        setError(`Load Error: ${e.message}`);
+        setError(`加载失败: ${e.message}。请检查网络或 PDB ID。`);
         setLoading(false);
     }
   };
 
+  // --- 2. 修复上传无反应 (绕过 Asset 系统) ---
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -109,186 +161,309 @@ const BioLens = () => {
     setLoading(true);
     setError(null);
 
-    const plugin = pluginRef.current;
-    if(!plugin) return;
+    const ctx = getPluginContext();
+    if(!ctx) return;
 
     try {
-        await plugin.clear();
-        
+        await ctx.clear(); 
         const format = getFormat(file.name);
         const isBinary = format === 'bcif'; 
         
-        console.log(`Attempting to load ${file.name} as ${format} (Binary: ${isBinary})`);
+        console.log(`Reading local file: ${file.name} (${format})`);
 
-        // --- 核心修复逻辑：双重尝试加载 ---
-        try {
-            // 尝试 1: 标准读取
-            const data = await plugin.builders.data.readFile({ file, label: file.name, isBinary });
-            const trajectory = await plugin.builders.structure.parseTrajectory(data, format);
-            const model = await plugin.builders.structure.createModel(trajectory);
-            await plugin.builders.structure.createStructure(model);
-        } catch (innerErr) {
-            console.warn("Standard read failed, attempting fallback to text read...", innerErr);
-            
-            // 尝试 2 (Fallback): 强制作为文本读取
-            // 很多时候 Mol* 对 file 对象的处理在不同浏览器有兼容性问题，
-            // 这里我们手动读出文本，再喂给 Mol*
-            if (!isBinary) {
-                const text = await file.text();
-                const data = await plugin.builders.data.rawData({ data: text, label: file.name });
-                const trajectory = await plugin.builders.structure.parseTrajectory(data, format);
-                const model = await plugin.builders.structure.createModel(trajectory);
-                await plugin.builders.structure.createStructure(model);
-            } else {
-                throw innerErr; // 二进制文件没法转文本，抛出错误
-            }
+        let data;
+        if (isBinary) {
+            const buffer = await file.arrayBuffer();
+            data = await ctx.builders.data.rawData({ data: new Uint8Array(buffer), label: file.name });
+        } else {
+            const text = await file.text();
+            data = await ctx.builders.data.rawData({ data: text, label: file.name });
         }
+
+        const trajectory = await ctx.builders.structure.parseTrajectory(data, format);
+        const model = await ctx.builders.structure.createModel(trajectory);
+        await ctx.builders.structure.createStructure(model);
         
+        await applyStyle(); // 立即上色，不传参数，自动查找
+        
+        ctx.managers.camera.reset();
         setLoading(false);
-        plugin.managers.camera.reset();
-        
     } catch(err) {
         console.error("Upload Error:", err);
-        // 显示详细错误给用户
-        setError(`Parsing Failed: ${err.message}. Detected format: ${getFormat(file.name).toUpperCase()}`);
+        setError(`解析失败: ${err.message}`);
         setLoading(false);
     }
   };
 
-  // --- Watch for Style Changes ---
+  // 监听状态变化自动重绘
   useEffect(() => {
+      // 只有当不是正在加载时才重绘，避免冲突
       if(pluginRef.current && !loading && !error) {
           applyStyle();
       }
-  }, [currentStyle, focusMode, showInteractions, customColor, useCustomColor, loading]);
+  }, [currentStyle, focusMode, showInteractions, customColor, useCustomColor]);
 
-  const applyStyle = async () => {
-      const plugin = pluginRef.current;
-      if (!plugin) return;
+  // --- 3 & 4. 修复画风重置 & 染色 (Clean Slate Strategy) ---
+  const applyStyle = async (structureInput) => {
+      const ctx = getPluginContext();
+      if (!ctx) return;
       
+      const hierarchy = ctx.managers.structure.hierarchy.current;
+      
+      // 核心修复：正确解析 structure 对象
+      let structure = structureInput;
+      if (structureInput && !structureInput.components) {
+          structure = hierarchy.structures.find(s => s.cell.obj?.id === structureInput.cell?.obj?.id) || hierarchy.structures[0];
+      }
+      
+      if (!structure) {
+          structure = hierarchy.structures[0];
+      }
+      
+      if (!structure) return;
+
       try {
-          const managers = plugin.managers;
-          const hierarchy = managers.structure.hierarchy.current;
-          if (!hierarchy.structures[0]) return;
-          const structure = hierarchy.structures[0];
-
-          // 1. Clear old
-          await managers.structure.component.clear(structure.cell);
-
-          // 2. Background
-          const canvas = plugin.canvas3d;
+          // A. 画布/光照设置 (Post-Processing)
+          const canvas = ctx.canvas3d;
           if(canvas) {
-              let bgColor = 0xffffff;
-              if(currentStyle === 'hologram' || currentStyle === 'xray') bgColor = 0x000000;
-              if(currentStyle === 'glass') bgColor = 0x111111;
-              if(currentStyle === 'journal_cell') bgColor = 0xfdfbf7;
-              
-              const renderer = canvas.props.renderer;
-              plugin.canvas3d.setProps({ renderer: { ...renderer, backgroundColor: bgColor } });
+              let props = {
+                  renderer: { backgroundColor: 0xffffff }, // Default white
+                  postProcessing: {
+                      occlusion: { name: 'off', params: {} },
+                      outline: { name: 'off', params: {} },
+                  }
+              };
+
+              if(currentStyle === 'journal_nature') {
+                  props.renderer.backgroundColor = 0xffffff;
+                  props.postProcessing.occlusion = { 
+                      name: 'on', 
+                      params: { samples: 32, radius: 5, bias: 0.8, blurKernelSize: 15, resolutionScale: 1 } 
+                  };
+              } 
+              else if(currentStyle === 'journal_cell') {
+                  props.renderer.backgroundColor = 0xfdfbf7; // Warm white
+                  props.postProcessing.outline = { 
+                      name: 'on', 
+                      params: { scale: 1, threshold: 0.33, color: 0x000000, includeTransparent: true } 
+                  };
+                  props.postProcessing.occlusion = { 
+                      name: 'on', 
+                      params: { samples: 32, radius: 4, bias: 1.0 } 
+                  };
+              }
+              else if(currentStyle === 'glass') {
+                  props.renderer.backgroundColor = 0x000000;
+              }
+              else if(currentStyle === 'hologram') {
+                  props.renderer.backgroundColor = 0x000000;
+              }
+              else if(currentStyle === 'xray') {
+                  props.renderer.backgroundColor = 0x111111;
+              }
+
+              ctx.canvas3d.setProps(props);
           }
 
-          // 3. Components
-          const polymer = await managers.structure.component.add({
-              selection: managers.structure.selection.fromSelectionQuery('polymer'),
-              label: 'Polymer'
-          });
-
-          // Coloring Logic
+          // B. 准备颜色
           const customColorInt = parseInt(customColor.replace('#', ''), 16);
           let colorTheme = useCustomColor ? 'uniform' : 'chain-id';
           let colorParams = useCustomColor ? { value: customColorInt } : {};
 
-          // Representations
-          let type = 'cartoon';
-          let typeParams = {};
-          
-          if(currentStyle === 'journal_cell') {
-              typeParams = { sizeFactor: 0.4 };
-          } else if(currentStyle === 'glass') {
-              type = 'spacefill';
-              typeParams = { ignoreLight: false, alpha: 0.3, sizeFactor: 1.1 };
-          } else if(currentStyle === 'hologram') {
-              typeParams = { sizeFactor: 0.1 };
-              colorTheme = 'uniform';
-              colorParams = { value: 0x00ffcc };
-          } else if(currentStyle === 'xray') {
-              // Add transparent surface + cartoon
-              await managers.structure.representation.addRepresentation(polymer, {
-                  type: 'molecular-surface',
-                  typeParams: { alpha: 0.15, flatShaded: true, doubleSided: true, ignoreLight: true }, 
-                  color: 'uniform', colorParams: { value: 0xffffff }
-              });
-              type = 'cartoon';
-              typeParams = { sizeFactor: 0.2 };
-              colorTheme = 'uniform';
-              colorParams = { value: 0xffffff };
+          // C. 移除所有现有的子组件
+          const components = structure.components;
+          if (components && components.length > 0) {
+              await ctx.managers.structure.hierarchy.remove(components);
           }
 
-          await managers.structure.representation.addRepresentation(polymer, {
-              type, typeParams, color: colorTheme, colorParams
-          });
-
-          // Ligands
+          // D. 重新创建组件和视觉效果
+          
+          // --- 1. Polymer (骨架) ---
+          let polymerComp;
           try {
-            const ligand = await managers.structure.component.add({
-                selection: managers.structure.selection.fromSelectionQuery('ligand'),
-                label: 'Ligand'
-            });
-            await managers.structure.representation.addRepresentation(ligand, {
-                type: 'ball-and-stick', color: 'element-symbol', typeParams: { sizeFactor: 0.35 }
-            });
-            if (focusMode === 'binder') {
-                const loci = managers.structure.selection.getLoci(ligand.cell.obj.data);
-                plugin.managers.camera.focusLoci(loci);
-            }
-          } catch (e) {}
+              const polymerQuery = ctx.managers.structure.selection.fromSelectionQuery('polymer');
+              // 关键修复：增加空值检查，防止 reading 'expression' of undefined
+              if (polymerQuery) {
+                  polymerComp = await ctx.builders.structure.tryCreateComponentFromExpression(
+                      structure.cell, polymerQuery.expression, 'polymer', { label: 'Polymer', key: 'polymer' }
+                  );
+              }
+          } catch(e) {
+              console.warn("Polymer component creation failed:", e);
+          }
 
-          // H-Bonds
+          if (polymerComp) {
+              if(currentStyle === 'journal_cell') {
+                  // Cell Style: Putty Cartoon
+                  await ctx.builders.structure.representation.addRepresentation(polymerComp, {
+                      type: 'putty', 
+                      color: colorTheme, colorParams
+                  });
+              } else if(currentStyle === 'glass') {
+                  // Glass Style: Spacefill (Transparent) + Cartoon (Solid)
+                  await ctx.builders.structure.representation.addRepresentation(polymerComp, {
+                      type: 'spacefill', 
+                      typeParams: { alpha: 0.3, ignoreLight: false }, 
+                      color: colorTheme, colorParams
+                  });
+                  await ctx.builders.structure.representation.addRepresentation(polymerComp, {
+                      type: 'cartoon', color: colorTheme, colorParams
+                  });
+              } else if(currentStyle === 'hologram') {
+                  // Hologram: Neon wireframe
+                  const neonColor = useCustomColor ? customColorInt : 0x00ffcc;
+                  await ctx.builders.structure.representation.addRepresentation(polymerComp, {
+                      type: 'cartoon', typeParams: { sizeFactor: 0.1 }, color: 'uniform', colorParams: { value: neonColor }
+                  });
+                  await ctx.builders.structure.representation.addRepresentation(polymerComp, {
+                      type: 'ball-and-stick', typeParams: { sizeFactor: 0.1 }, color: 'uniform', colorParams: { value: 0xffffff }
+                  });
+              } else if(currentStyle === 'xray') {
+                  await ctx.builders.structure.representation.addRepresentation(polymerComp, {
+                      type: 'molecular-surface', 
+                      typeParams: { alpha: 0.2, flatShaded: true, doubleSided: true, ignoreLight: true }, 
+                      color: 'uniform', colorParams: { value: 0xffffff }
+                  });
+                  await ctx.builders.structure.representation.addRepresentation(polymerComponent, {
+                      type: 'cartoon', color: 'uniform', colorParams: { value: 0xffffff }
+                  });
+              } else {
+                  // Nature (Default): High quality cartoon
+                  await ctx.builders.structure.representation.addRepresentation(polymerComp, {
+                      type: 'cartoon', 
+                      color: colorTheme, colorParams
+                  });
+              }
+          } else {
+              // 兜底：如果没有 Polymer (比如 DNA 或小分子复合物)，就画全部
+              await ctx.builders.structure.representation.addRepresentation(structure.cell, { 
+                  type: 'ball-and-stick', color: colorTheme, colorParams 
+              });
+          }
+
+          // --- 2. Ligand (配体) ---
+          try {
+              const ligandQuery = ctx.managers.structure.selection.fromSelectionQuery('ligand');
+              // 关键修复：增加空值检查
+              if (ligandQuery) {
+                  const ligandComp = await ctx.builders.structure.tryCreateComponentFromExpression(
+                      structure.cell, ligandQuery.expression, 'ligand', { label: 'Ligand' }
+                  );
+                  
+                  if (ligandComp) {
+                      await ctx.builders.structure.representation.addRepresentation(ligandComp, {
+                          type: 'ball-and-stick', 
+                          typeParams: { sizeFactor: 0.4 },
+                          color: 'element-symbol' 
+                      });
+                      
+                      if (focusMode === 'binder') {
+                          const loci = ctx.managers.structure.selection.getLoci(ligandComp.obj.data);
+                          ctx.managers.camera.focusLoci(loci);
+                      }
+                  }
+              }
+          } catch(e) {
+              console.warn("Ligand creation failed:", e);
+          }
+
+          // --- 3. Interactions ---
           if (showInteractions) {
-              await managers.structure.representation.addRepresentation(structure, {
+              // 在根结构上添加相互作用
+              await ctx.builders.structure.representation.addRepresentation(structure.cell, {
                  type: 'interactions',
-                 typeParams: { lineSizeFactor: 0.1, includeCovalent: false },
+                 typeParams: { lineSizeFactor: 0.05, includeCovalent: false },
                  color: 'interaction-type'
               });
           }
+
       } catch (styleErr) {
           console.error("Style Apply Error:", styleErr);
       }
   };
 
   const toggleInteractions = () => setShowInteractions(!showInteractions);
-  const handleColorChange = (e) => { setCustomColor(e.target.value); setUseCustomColor(true); };
-  const takeScreenshot = () => { pluginRef.current?.helpers.viewportScreenshot?.share(); };
   
-  // --- AI Logic (Placeholder until API is connected) ---
+  const handleColorChange = (e) => { 
+      setCustomColor(e.target.value); 
+      setUseCustomColor(true); 
+  };
+
+  const resetView = async () => {
+      setUseCustomColor(false);
+      setShowInteractions(false);
+      setCurrentStyle('journal_nature');
+      setFocusMode('global');
+      const ctx = getPluginContext();
+      if(ctx) ctx.managers.camera.reset();
+  };
+
+  const takeScreenshot = () => { 
+      const ctx = getPluginContext();
+      if (ctx?.helpers?.viewportScreenshot?.share) {
+          ctx.helpers.viewportScreenshot.share();
+      } else {
+          try {
+              const canvas = containerRef.current?.querySelector('canvas');
+              if (canvas) {
+                  const image = canvas.toDataURL("image/png");
+                  const link = document.createElement('a');
+                  link.href = image;
+                  link.download = `BioLens-${Date.now()}.png`;
+                  link.click();
+              }
+          } catch(e){}
+      }
+  };
+  
   const handleAiSubmit = async (e) => {
     e.preventDefault();
     if(!aiInput.trim()) return;
     
-    // UI Update
     setAiHistory(prev => [...prev, {role: 'user', text: aiInput}]);
-    const userInput = aiInput;
+    const cmd = aiInput.toLowerCase();
     setAiInput("");
     
-    // 如果你已经配置好了 api/chat.js，可以在这里取消注释
-    /*
-    try {
-        const res = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: userInput })
-        });
-        const data = await res.json();
-        // 处理 data.result ...
-    } catch (err) { ... }
-    */
+    let reply = "指令已接收。";
+    const ctx = getPluginContext();
+    const MS = window.molstar?.MolScriptBuilder;
 
-    // Mock Response
-    let reply = "Connect API to fully activate.";
-    if(userInput.includes("red")) { setCustomColor("#ff0000"); setUseCustomColor(true); reply = "Coloring Red."; }
-    else if(userInput.includes("blue")) { setCustomColor("#4f46e5"); setUseCustomColor(true); reply = "Coloring Blue."; }
-    else if(userInput.includes("reset")) { setUseCustomColor(false); reply = "Resetting view."; }
-    
+    try {
+        if(cmd.includes("red") || cmd.includes("红")) { 
+            setCustomColor("#ff0000"); setUseCustomColor(true); reply = "已染色为红色。"; 
+        }
+        else if(cmd.includes("blue") || cmd.includes("蓝")) { 
+            setCustomColor("#4f46e5"); setUseCustomColor(true); reply = "已染色为蓝色。"; 
+        }
+        else if(cmd.includes("reset") || cmd.includes("复位")) { 
+            resetView(); reply = "视图已重置。"; 
+        }
+        else if(cmd.includes("bond") || cmd.includes("interaction") || cmd.includes("氢键")) { 
+            setShowInteractions(true); reply = "已显示相互作用。"; 
+        }
+        else if (MS && ctx) {
+            const structure = ctx.managers.structure.hierarchy.current.structures[0];
+            const chainMatches = cmd.match(/[a-z0-9]链/g);
+            if (chainMatches && chainMatches.length >= 1) {
+                const chains = chainMatches.map(s => s.replace('链', '').toUpperCase());
+                const chainExp = MS.struct.generator.atomGroups({
+                    'chain-test': MS.core.logic.or(
+                        chains.map(c => MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), c]))
+                    )
+                });
+                const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
+                    structure.cell, chainExp, 'custom-selection', { label: `Chain ${chains.join('+')}` }
+                );
+                await ctx.builders.structure.representation.addRepresentation(comp, { type: 'ball-and-stick', color: 'chain-id' });
+                const loci = ctx.managers.structure.selection.getLoci(comp.obj.data);
+                ctx.managers.camera.focusLoci(loci);
+                reply = `已聚焦 ${chains.join(' ')} 链。`;
+            }
+        }
+    } catch (err) {
+        console.error(err);
+        reply = "指令解析失败。";
+    }
     setTimeout(() => setAiHistory(prev => [...prev, {role: 'system', text: reply}]), 500);
   };
 
@@ -301,14 +476,12 @@ const BioLens = () => {
   ];
 
   const modes = [
-    { id: 'global', name: 'Global View', icon: Maximize },
-    { id: 'binder', name: 'Binder Focus', icon: Layers },
-    { id: 'structure_prop', name: 'Surface Prop', icon: Sun },
+    { id: 'global', name: 'Global', icon: Maximize },
+    { id: 'binder', name: 'Binder', icon: Layers },
   ];
 
   return (
     <div className="flex flex-col h-screen w-full bg-gray-50 text-gray-800 font-sans overflow-hidden">
-      {/* Header */}
       <div className="flex items-center justify-between px-6 py-3 bg-white border-b border-gray-200 z-10 shadow-sm">
         <div className="flex items-center gap-2">
           <div className="bg-indigo-600 p-1.5 rounded-lg">
@@ -316,52 +489,63 @@ const BioLens = () => {
           </div>
           <div>
             <h1 className="text-xl font-bold text-gray-900 tracking-tight">BioLens <span className="text-indigo-600">Pro</span></h1>
-            <p className="text-xs text-gray-500">Synthetic Bio Edition (Debug Mode)</p>
+            <p className="text-xs text-gray-500">Synthetic Bio Edition</p>
           </div>
         </div>
-        <div className="flex items-center gap-4">
-           <label className="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md cursor-pointer transition-colors shadow-sm">
-             <Upload size={16} />
-             <span className="text-sm font-medium">Upload File</span>
-             <input type="file" accept=".pdb,.cif,.ent,.mmcif" onChange={handleFileUpload} className="hidden" />
-           </label>
+        
+        {/* Fetch & Upload Bar */}
+        <div className="flex items-center gap-2">
+            <form onSubmit={handlePdbFetch} className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
+                <div className="px-3 text-gray-400"><Search size={14}/></div>
+                <input 
+                    type="text" 
+                    value={pdbIdInput}
+                    onChange={(e) => setPdbIdInput(e.target.value.toUpperCase())}
+                    placeholder="PDB ID (e.g. 1CRN)" 
+                    className="w-32 py-1.5 bg-transparent text-sm focus:outline-none"
+                    maxLength={4}
+                />
+                <button type="submit" className="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-xs font-medium transition-colors">Fetch</button>
+            </form>
+            
+            <div className="h-6 w-px bg-gray-300 mx-2"></div>
+
+            <label className="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md cursor-pointer transition-colors shadow-sm">
+                <Upload size={16} />
+                <span className="text-sm font-medium">Upload</span>
+                <input type="file" accept=".pdb,.cif,.ent,.mmcif" onChange={handleFileUpload} className="hidden" />
+            </label>
+            <button onClick={takeScreenshot} className="p-2 border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md" title="Screenshot">
+                <Download size={16} />
+            </button>
         </div>
       </div>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Main Canvas */}
         <div className="relative flex-1 bg-gray-100">
-           {/* Detailed Error Box */}
            {error && (
              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-white p-6 rounded-lg shadow-2xl border-2 border-red-500 max-w-lg w-full">
-                <div className="flex items-center gap-2 text-red-600 font-bold text-lg mb-2">
-                    <AlertCircle /> Error
-                </div>
-                <div className="bg-gray-100 p-3 rounded text-sm font-mono text-gray-700 break-words mb-4 max-h-40 overflow-auto">
-                    {error}
-                </div>
-                <button onClick={() => setError(null)} className="w-full py-2 bg-gray-200 hover:bg-gray-300 rounded font-medium">
-                    Close
-                </button>
+                <div className="flex items-center gap-2 text-red-600 font-bold text-lg mb-2"><AlertCircle /> Error</div>
+                <div className="bg-gray-100 p-3 rounded text-sm font-mono text-gray-700 break-words mb-4 max-h-40 overflow-auto">{error}</div>
+                <button onClick={() => setError(null)} className="w-full py-2 bg-gray-200 hover:bg-gray-300 rounded font-medium">Close</button>
              </div>
            )}
-           
            {loading && (
              <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/80">
                <div className="animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent"></div>
              </div>
            )}
-
            <div ref={containerRef} className="absolute inset-0 w-full h-full" />
-
-           {/* Controls */}
-           <div className="absolute top-4 right-4 z-20">
+           
+           <div className="absolute top-4 right-4 z-20 flex gap-2">
+               <button onClick={resetView} className="flex items-center gap-2 px-4 py-2 rounded-full shadow-lg border bg-white text-gray-700 hover:bg-gray-50">
+                   <RefreshCw size={16} /> <span className="text-sm">Reset</span>
+               </button>
                <button onClick={toggleInteractions} className={`flex items-center gap-2 px-4 py-2 rounded-full shadow-lg border ${showInteractions ? 'bg-indigo-600 text-white' : 'bg-white text-gray-700'}`}>
                    <Share2 size={16} /> <span className="text-sm">H-Bonds</span>
                </button>
            </div>
-           
-           {/* AI Chat Bar */}
+
            <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 w-full max-w-lg px-4 z-20">
                {aiHistory.length > 1 && (
                  <div className="mb-2 bg-black/60 backdrop-blur text-white text-xs p-2 rounded-lg max-h-32 overflow-y-auto">
@@ -370,27 +554,38 @@ const BioLens = () => {
                )}
                <form onSubmit={handleAiSubmit} className="relative">
                   <div className="absolute left-3 top-3 text-indigo-400"><MessageSquare size={18}/></div>
-                  <input type="text" value={aiInput} onChange={e=>setAiInput(e.target.value)} placeholder="Type command..." className="w-full bg-black/70 backdrop-blur border border-indigo-500/30 text-white pl-10 pr-12 py-3 rounded-full outline-none" />
+                  <input type="text" value={aiInput} onChange={e=>setAiInput(e.target.value)} placeholder="AI指令..." className="w-full bg-black/70 backdrop-blur border border-indigo-500/30 text-white pl-10 pr-12 py-3 rounded-full outline-none" />
                   <button type="submit" className="absolute right-2 top-2 p-1.5 bg-indigo-600 rounded-full text-white"><Send size={16}/></button>
                </form>
            </div>
         </div>
 
-        {/* Sidebar */}
         <div className="w-64 bg-white border-l border-gray-200 p-4 z-20 shadow-xl flex flex-col gap-6">
            <div>
-               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Styles</h3>
+               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Styles (滤镜)</h3>
                <div className="grid grid-cols-2 gap-2">
                    {styles.map(s => (
-                       <button key={s.id} onClick={() => setCurrentStyle(s.id)} className={`p-2 rounded-lg border text-xs font-medium ${currentStyle === s.id ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'hover:bg-gray-50'}`}>{s.name}</button>
+                       <button key={s.id} onClick={() => setCurrentStyle(s.id)} className={`p-2 rounded-lg border text-xs font-medium transition-colors ${currentStyle === s.id ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'hover:bg-gray-50'}`}>{s.name}</button>
                    ))}
                </div>
            </div>
+           
            <div>
-               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Tint</h3>
+               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Scene Focus (场景)</h3>
+               <div className="grid grid-cols-1 gap-2">
+                   {modes.map(m => (
+                       <button key={m.id} onClick={() => setFocusMode(m.id)} className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-medium ${focusMode === m.id ? 'bg-gray-800 text-white' : 'hover:bg-gray-50'}`}>
+                           <span className="flex items-center gap-2"><m.icon size={14} /> {m.name}</span>
+                       </button>
+                   ))}
+               </div>
+           </div>
+
+           <div>
+               <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Tint (染色)</h3>
                <div className="flex items-center gap-2">
                    <input type="color" value={customColor} onChange={handleColorChange} className="w-full h-8 cursor-pointer rounded border border-gray-200" />
-                   {useCustomColor && <button onClick={() => setUseCustomColor(false)} className="text-[10px] text-gray-500 underline">Reset</button>}
+                   {useCustomColor && <button onClick={() => { setUseCustomColor(false); setCustomColor("#4f46e5"); }} className="text-[10px] text-gray-500 underline">Reset</button>}
                </div>
            </div>
         </div>
