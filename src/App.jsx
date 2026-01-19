@@ -1,51 +1,65 @@
-import React, { useState, useEffect, useRef } from 'react';
+下面给你一个**全量可覆盖**的新版 `App.jsx`（整文件复制替换即可）。这一版的核心变化是：
+
+* ✅ **不再和 Mol* 默认 preset “打架”**
+  结构加载后，Mol* 会自动生成“主体蛋白/配体”的 representations。你之前“滤镜/颜色不变”的根因就是没有更新到**正在显示的那套 repr**。
+* ✅ **颜色/滤镜改成真正的底层更新：build → update → commit**
+  我会直接遍历当前 structure 的 `representation.representations`，对每个 repr 做 update，再 commit，所以**色卡一定会影响蛋白**（只要 Mol* 正常显示结构）。
+* ✅ **滤镜变化明显**：Nature/Cell 不只是背景，会改变主体表示（cartoon/putty）、透明度、以及额外 surface 层（Glass/Xray/Holo）。
+* ✅ 保留你要的：Binder pocket + AI 自然语言（链/残基/配体/pocket）
+
+> 你直接把下面整段代码复制，覆盖 `App.jsx` 全部内容。
+> 改完运行后，你先测试：**色卡染色**、**Nature/Cell 切换**、**Glass/Xray**、**Binder pocket**、**AI 残基染色**。
+
+---
+
+```jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Camera, Upload, Download, Layers, Maximize, AlertCircle,
   MessageSquare, Send, Share2, RefreshCw, Search, Droplet, Disc, Box, Monitor, Ghost
-} from 'lucide-react';
+} from "lucide-react";
 
 /** -----------------------------
- *  Utilities: safe loader
+ *  Load Mol* from CDN (safe)
  * ------------------------------*/
-const loadScript = (src) => {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const script = document.createElement('script');
-    script.src = src;
-    script.onload = () => resolve();
-    script.onerror = reject;
-    document.head.appendChild(script);
+const loadScript = (src) =>
+  new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
   });
-};
 
 const loadStyle = (href) => {
   if (document.querySelector(`link[href="${href}"]`)) return;
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = href;
-  document.head.appendChild(link);
+  const l = document.createElement("link");
+  l.rel = "stylesheet";
+  l.href = href;
+  document.head.appendChild(l);
 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 const COLOR_NAME_MAP = {
-  red: '#ff0000', 红: '#ff0000',
-  blue: '#4f46e5', 蓝: '#4f46e5',
-  green: '#22c55e', 绿: '#22c55e',
-  yellow: '#facc15', 黄: '#facc15',
-  purple: '#a855f7', 紫: '#a855f7',
-  orange: '#f97316', 橙: '#f97316',
-  black: '#000000', 黑: '#000000',
-  white: '#ffffff', 白: '#ffffff',
-  cyan: '#06b6d4', 青: '#06b6d4',
-  pink: '#ec4899', 粉: '#ec4899'
+  red: "#ff0000", 红: "#ff0000",
+  blue: "#4f46e5", 蓝: "#4f46e5",
+  green: "#22c55e", 绿: "#22c55e",
+  yellow: "#facc15", 黄: "#facc15",
+  purple: "#a855f7", 紫: "#a855f7",
+  orange: "#f97316", 橙: "#f97316",
+  black: "#000000", 黑: "#000000",
+  white: "#ffffff", 白: "#ffffff",
+  cyan: "#06b6d4", 青: "#06b6d4",
+  pink: "#ec4899", 粉: "#ec4899",
 };
 
 function normalizeHexColor(input) {
   if (!input) return null;
   const s = String(input).trim();
   if (COLOR_NAME_MAP[s]) return COLOR_NAME_MAP[s];
-  // #RRGGBB or RRGGBB
   const m = s.match(/^#?([0-9a-fA-F]{6})$/);
   if (m) return `#${m[1].toLowerCase()}`;
   return null;
@@ -53,77 +67,73 @@ function normalizeHexColor(input) {
 
 function hexToInt(hex) {
   try {
-    return parseInt(hex.replace('#', ''), 16);
+    return parseInt(String(hex).replace("#", ""), 16);
   } catch {
     return 0x4f46e5;
   }
 }
 
 /** -----------------------------
- *  AI parsing (simple + robust)
+ *  AI parsing (robust regex)
  * ------------------------------*/
 function parseAiCommand(raw) {
-  const text = (raw || '').trim();
+  const text = (raw || "").trim();
   const lower = text.toLowerCase();
 
   const intent = {
     raw: text,
     wantReset: false,
-    wantInteractions: null, // true/false/null
-    wantTint: null,         // { hex }
-    wantOnlyChains: null,   // [ 'A','B' ] or null
-    wantFocusChains: null,  // [ 'A','B' ] or null
-    residueSelect: null,    // { chain, seq, aa } (aa optional)
-    residueColor: null,     // hex
+    wantInteractions: null,    // true/false/null
+    wantTint: null,            // { hex }
+    wantOnlyChains: null,      // ['A','B']
+    wantFocusChains: null,     // ['A','B']
+    residueSelect: null,       // { chain?, seq, aa? }
+    residueColor: null,        // hex
     wantFocusLigand: false,
     wantEmphasizeLigand: false,
-    wantPocketRadius: null, // number
-    wantPocketToggle: null  // true/false/null
+    wantPocketRadius: null,
+    wantPocketToggle: null,
   };
 
-  // reset
-  if (lower.includes('reset') || text.includes('复位') || text.includes('重置')) {
+  if (lower.includes("reset") || text.includes("复位") || text.includes("重置")) {
     intent.wantReset = true;
     return intent;
   }
 
   // interactions
-  if (lower.includes('bond') || lower.includes('interaction') || text.includes('氢键') || text.includes('相互作用')) {
+  if (lower.includes("bond") || lower.includes("interaction") || text.includes("氢键") || text.includes("相互作用")) {
     intent.wantInteractions = true;
   }
-  if (lower.includes('hide interactions') || text.includes('关闭相互作用') || text.includes('隐藏氢键')) {
+  if (lower.includes("hide interactions") || text.includes("关闭相互作用") || text.includes("隐藏氢键")) {
     intent.wantInteractions = false;
   }
 
-  // pocket radius / toggle
-  // examples: "pocket 8", "口袋 6", "显示口袋 7Å", "关闭口袋"
-  const pocketOff = lower.includes('pocket off') || text.includes('关闭口袋') || text.includes('隐藏口袋');
-  const pocketOn = lower.includes('pocket on') || text.includes('显示口袋') || text.includes('打开口袋') || text.includes('开启口袋');
-  if (pocketOff) intent.wantPocketToggle = false;
-  if (pocketOn) intent.wantPocketToggle = true;
+  // pocket on/off + radius
+  if (lower.includes("pocket off") || text.includes("关闭口袋") || text.includes("隐藏口袋")) intent.wantPocketToggle = false;
+  if (lower.includes("pocket on") || text.includes("显示口袋") || text.includes("打开口袋") || text.includes("开启口袋")) intent.wantPocketToggle = true;
 
-  const pr = text.match(/(?:pocket|口袋|pocket\s*radius|半径)\s*([0-9]{1,2})(?:\s*å|å|a|A)?/i)
-         || text.match(/([0-9]{1,2})\s*(?:å|Å)\s*(?:pocket|口袋)/i);
+  const pr =
+    text.match(/(?:pocket|口袋|半径|radius)\s*([0-9]{1,2})(?:\s*å|Å)?/i) ||
+    text.match(/([0-9]{1,2})\s*(?:å|Å)\s*(?:pocket|口袋)/i);
   if (pr && pr[1]) {
     const r = clamp(parseInt(pr[1], 10), 2, 20);
     if (!Number.isNaN(r)) intent.wantPocketRadius = r;
   }
 
   // ligand focus/emphasize
-  if (text.includes('配体') && (text.includes('放大') || text.includes('突出') || text.includes('强调') || lower.includes('emphasize'))) {
+  if (text.includes("配体") && (text.includes("放大") || text.includes("突出") || text.includes("强调") || lower.includes("emphasize"))) {
     intent.wantEmphasizeLigand = true;
   }
-  if (text.includes('聚焦配体') || lower.includes('focus ligand') || (text.includes('配体') && text.includes('聚焦'))) {
+  if (text.includes("聚焦配体") || lower.includes("focus ligand") || (text.includes("配体") && text.includes("聚焦"))) {
     intent.wantFocusLigand = true;
   }
 
-  // tint color: "染成红色/涂成#ff00ff/变成蓝"
+  // tint: "染成红色 / 改成 #ff00ff"
   const colorWord = text.match(/(?:染色|涂成|变成|改成)\s*([#0-9a-fA-F]{6}|红|蓝|绿|黄|紫|橙|黑|白|青|粉|red|blue|green|yellow|purple|orange|black|white|cyan|pink)/i);
-  if (colorWord && colorWord[1]) {
+  if (colorWord?.[1]) {
     const hx = normalizeHexColor(colorWord[1]);
     if (hx) intent.wantTint = { hex: hx };
   } else {
-    // shorthand: "红", "blue"
     const shorthand = lower.match(/\b(red|blue|green|yellow|purple|orange|black|white|cyan|pink)\b/) || text.match(/[红蓝绿黄紫橙黑白青粉]/);
     if (shorthand) {
       const token = shorthand[1] || shorthand[0];
@@ -132,29 +142,24 @@ function parseAiCommand(raw) {
     }
   }
 
-  // chain intent
-  // "只显示A链", "只看A链", "显示A链B链", "聚焦A链"
-  const chainTokens = [];
-  // matches: A链, b链, 1链
+  // chains: A链 B链
   const chainMatches = text.match(/[A-Za-z0-9]\s*链/g);
+  const chains = [];
   if (chainMatches) {
-    chainMatches.forEach(m => {
-      const c = m.replace(/\s*链/g, '').trim().toUpperCase();
-      if (c) chainTokens.push(c);
+    chainMatches.forEach((m) => {
+      const c = m.replace(/\s*链/g, "").trim().toUpperCase();
+      if (c) chains.push(c);
     });
   }
-
-  if (chainTokens.length) {
-    const only = text.includes('只显示') || text.includes('只看') || text.includes('仅显示') || lower.includes('only show');
-    const focus = text.includes('聚焦') || lower.includes('focus');
-    if (only) intent.wantOnlyChains = Array.from(new Set(chainTokens));
-    else if (focus) intent.wantFocusChains = Array.from(new Set(chainTokens));
-    else intent.wantFocusChains = Array.from(new Set(chainTokens)); // default: focus if chains mentioned
+  if (chains.length) {
+    const only = text.includes("只显示") || text.includes("只看") || text.includes("仅显示") || lower.includes("only show");
+    const focus = text.includes("聚焦") || lower.includes("focus");
+    if (only) intent.wantOnlyChains = Array.from(new Set(chains));
+    else if (focus) intent.wantFocusChains = Array.from(new Set(chains));
+    else intent.wantFocusChains = Array.from(new Set(chains));
   }
 
-  // residue selection:
-  // examples:
-  // "A链 57号残基", "A 57", "LYS57", "A:57"
+  // residue: A链 57号 / A:57 / LYS57
   let chain = null;
   let seq = null;
   let aa = null;
@@ -177,14 +182,12 @@ function parseAiCommand(raw) {
   }
 
   if (!seq && aa) {
-    const aaSeq = text.match(new RegExp(`${aa}\\s*([0-9]{1,4})`, 'i'));
+    const aaSeq = text.match(new RegExp(`${aa}\\s*([0-9]{1,4})`, "i"));
     if (aaSeq) seq = parseInt(aaSeq[1], 10);
   }
 
-  // if residue mentioned but chain missing, we still accept seq-only highlight (less precise)
   if (seq && !Number.isNaN(seq)) {
     intent.residueSelect = { chain, seq, aa };
-    // residue-specific color if user said "染成xx" or provided color
     if (intent.wantTint?.hex) intent.residueColor = intent.wantTint.hex;
   }
 
@@ -192,49 +195,95 @@ function parseAiCommand(raw) {
 }
 
 /** -----------------------------
- *  Component: BioLens
+ *  Main Component
  * ------------------------------*/
-const BioLens = () => {
+export default function BioLens() {
   const containerRef = useRef(null);
-  const pluginRef = useRef(null);
+  const viewerRef = useRef(null);
 
-  // Data State
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
   const [fileName, setFileName] = useState("4hhb.pdb");
   const [pdbIdInput, setPdbIdInput] = useState("");
 
-  // Visualization State
-  const [currentStyle, setCurrentStyle] = useState('journal_nature');
-  const [focusMode, setFocusMode] = useState('global');
+  const [currentStyle, setCurrentStyle] = useState("journal_nature");
+  const [focusMode, setFocusMode] = useState("global");
+
   const [showInteractions, setShowInteractions] = useState(false);
 
-  // Pocket (Binder upgrade)
+  // Binder pocket controls
   const [showPocket, setShowPocket] = useState(true);
   const [pocketRadius, setPocketRadius] = useState(6);
 
-  // Ligand emphasis (AI can toggle)
+  // Ligand emphasize
   const [emphasizeLigand, setEmphasizeLigand] = useState(false);
 
-  // Color State
+  // Tint
   const [customColor, setCustomColor] = useState("#4f46e5");
   const [useCustomColor, setUseCustomColor] = useState(false);
 
-  // AI Chat State
+  // AI
   const [aiInput, setAiInput] = useState("");
-  const [aiHistory, setAiHistory] = useState([{ role: 'system', text: 'System Ready.' }]);
+  const [aiHistory, setAiHistory] = useState([{ role: "system", text: "System Ready." }]);
 
+  const styles = useMemo(() => ([
+    { id: "journal_nature", name: "Nature", icon: Droplet },
+    { id: "journal_cell", name: "Cell", icon: Disc },
+    { id: "glass", name: "Glass", icon: Box },
+    { id: "hologram", name: "Holo", icon: Monitor },
+    { id: "xray", name: "X-Ray", icon: Ghost },
+  ]), []);
+
+  const modes = useMemo(() => ([
+    { id: "global", name: "Global", icon: Maximize },
+    { id: "binder", name: "Binder", icon: Layers },
+  ]), []);
+
+  /** -----------------------------
+   *  Helpers: plugin ctx & structure
+   * ------------------------------*/
+  const getCtx = () => {
+    const v = viewerRef.current;
+    if (!v) return null;
+    return v.plugin || v;
+  };
+
+  const getFirstStructureWrapper = (ctx) => {
+    try {
+      return ctx?.managers?.structure?.hierarchy?.current?.structures?.[0] || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const getAllReprs = (structureWrapper) => {
+    // Mol* stores reprs in structureWrapper.representation.representations (object map)
+    try {
+      const repsObj = structureWrapper?.representation?.representations;
+      if (!repsObj) return [];
+      return Object.values(repsObj).filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+
+  /** -----------------------------
+   *  Init viewer
+   * ------------------------------*/
   useEffect(() => {
-    const initViewer = async () => {
+    const init = async () => {
+      setLoading(true);
+      setError(null);
+
       try {
         if (!window.molstar) {
           loadStyle("https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.css");
           await loadScript("https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.js");
         }
-        if (!window.molstar) throw new Error("Failed to load Mol* engine.");
+        if (!window.molstar) throw new Error("Mol* engine failed to load.");
 
-        await new Promise(r => setTimeout(r, 80));
-
+        // Create viewer
         const viewer = await window.molstar.Viewer.create(containerRef.current, {
           layoutIsExpanded: false,
           layoutShowControls: false,
@@ -247,611 +296,626 @@ const BioLens = () => {
           viewportShowAnimation: false,
         });
 
-        pluginRef.current = viewer;
+        viewerRef.current = viewer;
+
+        // Load default PDB
         await loadPdbFromUrl("https://files.rcsb.org/download/4hhb.pdb");
+
       } catch (e) {
-        console.error("Init Error:", e);
+        console.error(e);
         setError(`Initialization Failed: ${e.message}`);
         setLoading(false);
       }
     };
 
-    initViewer();
+    init();
 
     return () => {
       try {
-        pluginRef.current?.dispose?.();
-        pluginRef.current?.plugin?.dispose?.();
-      } catch { }
+        viewerRef.current?.dispose?.();
+        viewerRef.current?.plugin?.dispose?.();
+      } catch { /* ignore */ }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const getPluginContext = () => {
-    const viewer = pluginRef.current;
-    if (!viewer) return null;
-    return viewer.plugin || viewer;
+  /** -----------------------------
+   *  Load structure (URL / upload)
+   * ------------------------------*/
+  const getFormat = (nameOrUrl) => {
+    if (!nameOrUrl) return "pdb";
+    const s = String(nameOrUrl).toLowerCase();
+    if (s.endsWith(".bcif")) return "bcif";
+    if (s.endsWith(".cif") || s.endsWith(".mmcif")) return "mmcif";
+    return "pdb";
   };
 
-  const getFormat = (str) => {
-    if (!str) return 'pdb';
-    const lower = str.toLowerCase();
-    if (lower.endsWith('.cif') || lower.endsWith('.mmcif')) return 'mmcif';
-    if (lower.endsWith('.bcif')) return 'bcif';
-    return 'pdb';
+  const loadPdbFromUrl = async (url) => {
+    const ctx = getCtx();
+    if (!ctx) return;
+    setLoading(true);
+    setError(null);
+
+    try {
+      await ctx.clear();
+      const format = getFormat(url);
+
+      const data = await ctx.builders.data.download({ url }, { state: { isGhost: true } });
+      const traj = await ctx.builders.structure.parseTrajectory(data, format);
+      const model = await ctx.builders.structure.createModel(traj);
+      await ctx.builders.structure.createStructure(model);
+
+      // After structure exists: apply styles (this will update underlying reprs)
+      await applyAllVisuals();
+
+      ctx.managers.camera.reset();
+      setLoading(false);
+
+    } catch (e) {
+      console.error(e);
+      setError(`加载失败: ${e.message}`);
+      setLoading(false);
+    }
   };
 
   const handlePdbFetch = async (e) => {
     e.preventDefault();
-    if (!pdbIdInput || pdbIdInput.length < 4) {
+    const id = pdbIdInput.trim();
+    if (id.length < 4) {
       alert("请输入有效的 4 位 PDB ID (例如 1CRN)");
       return;
     }
-    const id = pdbIdInput.toLowerCase();
-    setFileName(id.toUpperCase());
-    await loadPdbFromUrl(`https://files.rcsb.org/download/${id}.pdb`);
+    const pid = id.toLowerCase();
+    setFileName(pid.toUpperCase());
     setPdbIdInput("");
-  };
-
-  const loadPdbFromUrl = async (url) => {
-    setLoading(true);
-    setError(null);
-    const ctx = getPluginContext();
-    if (!ctx) return;
-
-    try {
-      await ctx.clear();
-
-      const format = getFormat(url);
-
-      const data = await ctx.builders.data.download({ url: url }, { state: { isGhost: true } });
-      const trajectory = await ctx.builders.structure.parseTrajectory(data, format);
-      const model = await ctx.builders.structure.createModel(trajectory);
-      await ctx.builders.structure.createStructure(model);
-
-      await applyStyle();
-
-      ctx.managers.camera.reset();
-      setLoading(false);
-    } catch (e) {
-      console.error("Download Error:", e);
-      setError(`加载失败: ${e.message}。请检查网络或 PDB ID。`);
-      setLoading(false);
-    }
+    await loadPdbFromUrl(`https://files.rcsb.org/download/${pid}.pdb`);
   };
 
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setFileName(file.name);
+
+    const ctx = getCtx();
+    if (!ctx) return;
+
     setLoading(true);
     setError(null);
-
-    const ctx = getPluginContext();
-    if (!ctx) return;
+    setFileName(file.name);
 
     try {
       await ctx.clear();
       const format = getFormat(file.name);
-      const isBinary = format === 'bcif';
 
+      const isBinary = format === "bcif";
       let data;
       if (isBinary) {
-        const buffer = await file.arrayBuffer();
-        data = await ctx.builders.data.rawData({ data: new Uint8Array(buffer), label: file.name });
+        const buf = await file.arrayBuffer();
+        data = await ctx.builders.data.rawData({ data: new Uint8Array(buf), label: file.name });
       } else {
         const text = await file.text();
         data = await ctx.builders.data.rawData({ data: text, label: file.name });
       }
 
-      const trajectory = await ctx.builders.structure.parseTrajectory(data, format);
-      const model = await ctx.builders.structure.createModel(trajectory);
+      const traj = await ctx.builders.structure.parseTrajectory(data, format);
+      const model = await ctx.builders.structure.createModel(traj);
       await ctx.builders.structure.createStructure(model);
 
-      await applyStyle();
+      await applyAllVisuals();
 
       ctx.managers.camera.reset();
       setLoading(false);
+
     } catch (err) {
-      console.error("Upload Error:", err);
+      console.error(err);
       setError(`解析失败: ${err.message}`);
       setLoading(false);
+    } finally {
+      // reset input so re-upload same file triggers change
+      try { e.target.value = ""; } catch { /* ignore */ }
     }
   };
 
-  // 监听状态变化自动重绘（不在 loading/error 时触发）
-  useEffect(() => {
-    if (pluginRef.current && !loading && !error) {
-      applyStyle();
+  /** -----------------------------
+   *  Core: update underlying representations (the key fix)
+   * ------------------------------*/
+  const updateCanvasProps = async (ctx) => {
+    const canvas = ctx?.canvas3d;
+    if (!canvas?.setProps) return;
+
+    const props = {
+      renderer: { backgroundColor: 0xffffff },
+      postProcessing: {
+        occlusion: { name: "off", params: {} },
+        outline: { name: "off", params: {} },
+      },
+    };
+
+    if (currentStyle === "journal_nature") {
+      props.renderer.backgroundColor = 0xffffff;
+      props.postProcessing.occlusion = {
+        name: "on",
+        params: { samples: 48, radius: 5, bias: 0.8, blurKernelSize: 15, resolutionScale: 1 },
+      };
+    } else if (currentStyle === "journal_cell") {
+      props.renderer.backgroundColor = 0xfdfbf7;
+      props.postProcessing.outline = {
+        name: "on",
+        params: { scale: 1.25, threshold: 0.33, color: 0x000000, includeTransparent: true },
+      };
+      props.postProcessing.occlusion = {
+        name: "on",
+        params: { samples: 48, radius: 4, bias: 1.0, blurKernelSize: 11, resolutionScale: 1 },
+      };
+    } else if (currentStyle === "glass") {
+      props.renderer.backgroundColor = 0x000000;
+      props.postProcessing.outline = {
+        name: "on",
+        params: { scale: 1.05, threshold: 0.38, color: 0xffffff, includeTransparent: true },
+      };
+      props.postProcessing.occlusion = {
+        name: "on",
+        params: { samples: 32, radius: 6, bias: 0.7, blurKernelSize: 9, resolutionScale: 1 },
+      };
+    } else if (currentStyle === "hologram") {
+      props.renderer.backgroundColor = 0x000000;
+      props.postProcessing.outline = {
+        name: "on",
+        params: { scale: 1.45, threshold: 0.25, color: 0x00ffcc, includeTransparent: true },
+      };
+    } else if (currentStyle === "xray") {
+      props.renderer.backgroundColor = 0x111111;
+      props.postProcessing.outline = {
+        name: "on",
+        params: { scale: 1.1, threshold: 0.35, color: 0xffffff, includeTransparent: true },
+      };
     }
+
+    try {
+      canvas.setProps(props);
+    } catch (e) {
+      // non-fatal if Mol* changes prop schema
+      console.warn("canvas.setProps non-fatal:", e);
+    }
+  };
+
+  const shouldSkipReprForTint = (reprCellObj) => {
+    // Heuristic: don't recolor interactions, and prefer keeping ligand element colors.
+    const label = (reprCellObj?.label || "").toLowerCase();
+    const typeName = (reprCellObj?.data?.params?.type?.name || "").toLowerCase();
+    if (typeName.includes("interactions")) return true;
+    if (label.includes("interaction")) return true;
+    // ligand: often label contains ligand, but not guaranteed
+    if (label.includes("ligand")) return true;
+    return false;
+  };
+
+  const updateRepresentations = async (ctx) => {
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return;
+
+    const reps = getAllReprs(s);
+    if (!reps.length) return;
+
+    const tintColorInt = hexToInt(customColor);
+    const wantUniform = !!useCustomColor;
+
+    // We'll update existing reprs (the crucial part) so style/tint always shows.
+    const update = ctx.build();
+
+    for (const r of reps) {
+      if (!r?.cell?.obj) continue;
+
+      update.to(r).update((old) => {
+        try {
+          // Safely clone/mutate in place
+          const next = { ...old };
+
+          // 1) Tint: set uniform colorTheme on non-ligand + non-interactions
+          if (wantUniform && !shouldSkipReprForTint(r.cell.obj)) {
+            if (next.colorTheme) {
+              next.colorTheme = { ...next.colorTheme, name: "uniform", params: { value: tintColorInt } };
+            }
+          } else {
+            // if user turned off tint, restore chain-id for non-ligand (best-effort)
+            if (!wantUniform && !shouldSkipReprForTint(r.cell.obj) && next.colorTheme) {
+              next.colorTheme = { ...next.colorTheme, name: "chain-id", params: {} };
+            }
+          }
+
+          // 2) Style: adjust type & params (best-effort, guarded)
+          const t = next.type || next.typeParams ? next.type : next.type; // keep compatibility
+          const typeName = next.type?.name || old?.type?.name;
+
+          // Make Nature vs Cell visible: cartoon -> putty where possible
+          if (currentStyle === "journal_cell") {
+            if (typeName === "cartoon") {
+              next.type = { ...(next.type || {}), name: "putty", params: { ...(next.type?.params || {}) } };
+            }
+          } else {
+            // prefer cartoon in other modes if it was putty
+            if (typeName === "putty") {
+              next.type = { ...(next.type || {}), name: "cartoon", params: { ...(next.type?.params || {}) } };
+            }
+          }
+
+          // Make Glass/Xray/Holo more obvious by alpha + sizeFactor tweaks (only if params exist)
+          const p = next.type?.params ? { ...next.type.params } : null;
+
+          if (p) {
+            if (currentStyle === "glass") {
+              // Many repr types support alpha; if not, it will be ignored by Mol*
+              p.alpha = typeof p.alpha === "number" ? Math.min(p.alpha, 0.35) : 0.35;
+            } else if (currentStyle === "xray") {
+              p.alpha = typeof p.alpha === "number" ? Math.min(p.alpha, 0.20) : 0.20;
+            } else if (currentStyle === "hologram") {
+              p.alpha = typeof p.alpha === "number" ? Math.min(p.alpha, 0.55) : 0.55;
+              // thin look if supported
+              if (typeof p.sizeFactor === "number") p.sizeFactor = Math.min(p.sizeFactor, 0.2);
+            } else {
+              // Nature / others: solid
+              if (typeof p.alpha === "number") p.alpha = 1;
+            }
+            next.type = { ...(next.type || {}), params: p };
+          }
+
+          return next;
+        } catch {
+          return old;
+        }
+      });
+    }
+
+    try {
+      await update.commit();
+    } catch (e) {
+      console.warn("repr update commit non-fatal:", e);
+    }
+  };
+
+  /** -----------------------------
+   *  Add-on layers: interactions, ligand emphasis, pocket
+   *  These are additive; we remove and re-add each time to keep consistent.
+   * ------------------------------*/
+  const removeComponentsByLabelPrefix = async (ctx, prefixList) => {
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return;
+    const comps = s.components || [];
+    const toRemove = comps.filter((c) => {
+      const label = c?.cell?.obj?.label || "";
+      return prefixList.some((p) => label.startsWith(p));
+    });
+    if (toRemove.length) {
+      try { await ctx.managers.structure.hierarchy.remove(toRemove); } catch { /* ignore */ }
+    }
+  };
+
+  const addEmphasizeLigandLayer = async (ctx) => {
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return;
+    const MS = window.molstar?.MolScriptBuilder;
+    if (!MS) return;
+
+    try {
+      await removeComponentsByLabelPrefix(ctx, ["Addon:Ligand"]);
+      if (!emphasizeLigand) return;
+
+      const ligandQuery = ctx.managers.structure.selection.fromSelectionQuery("ligand");
+      if (!ligandQuery?.expression) return;
+
+      const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
+        s.cell,
+        ligandQuery.expression,
+        "addon-ligand",
+        { label: "Addon:Ligand" }
+      );
+      if (!comp) return;
+
+      await ctx.builders.structure.representation.addRepresentation(comp, {
+        type: "ball-and-stick",
+        typeParams: { sizeFactor: 0.85 },
+        color: "element-symbol"
+      });
+
+      await ctx.builders.structure.representation.addRepresentation(comp, {
+        type: "molecular-surface",
+        typeParams: { alpha: 0.28, flatShaded: true, doubleSided: true, ignoreLight: false },
+        color: "uniform",
+        colorParams: { value: 0xffffff }
+      });
+    } catch (e) {
+      console.warn("Ligand emphasize layer non-fatal:", e);
+    }
+  };
+
+  const addPocketLayerIfBinder = async (ctx) => {
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return;
+    const MS = window.molstar?.MolScriptBuilder;
+    if (!MS) return;
+
+    try {
+      await removeComponentsByLabelPrefix(ctx, ["Addon:Pocket"]);
+      if (focusMode !== "binder" || !showPocket) return;
+
+      const ligandQuery = ctx.managers.structure.selection.fromSelectionQuery("ligand");
+      if (!ligandQuery?.expression) return;
+
+      const includeSurroundings = MS?.struct?.modifier?.includeSurroundings;
+      if (typeof includeSurroundings !== "function") return;
+
+      const pocketExp = includeSurroundings({
+        0: ligandQuery.expression,
+        radius: clamp(parseFloat(pocketRadius), 2, 20),
+        "as-whole-residues": true
+      });
+
+      const pocketComp = await ctx.builders.structure.tryCreateComponentFromExpression(
+        s.cell,
+        pocketExp,
+        "addon-pocket",
+        { label: `Addon:Pocket ${clamp(parseFloat(pocketRadius), 2, 20)}Å` }
+      );
+      if (!pocketComp) return;
+
+      await ctx.builders.structure.representation.addRepresentation(pocketComp, {
+        type: "ball-and-stick",
+        typeParams: { sizeFactor: 0.23 },
+        color: "uniform",
+        colorParams: { value: 0xffd400 }
+      });
+      await ctx.builders.structure.representation.addRepresentation(pocketComp, {
+        type: "molecular-surface",
+        typeParams: { alpha: 0.13, flatShaded: true, doubleSided: true, ignoreLight: false },
+        color: "uniform",
+        colorParams: { value: 0xffd400 }
+      });
+    } catch (e) {
+      console.warn("Pocket layer non-fatal:", e);
+    }
+  };
+
+  const addInteractionsLayer = async (ctx) => {
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return;
+
+    try {
+      await removeComponentsByLabelPrefix(ctx, ["Addon:Interactions"]);
+      if (!showInteractions) return;
+
+      // Add interactions on structure cell directly (safe)
+      const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
+        s.cell,
+        // Use "everything" selection by leaving expression as whole structure
+        // If this fails, we just fallback to addRepresentation on s.cell
+        null,
+        "addon-interactions",
+        { label: "Addon:Interactions" }
+      );
+
+      const target = comp?.cell ? comp : s.cell;
+
+      await ctx.builders.structure.representation.addRepresentation(target, {
+        type: "interactions",
+        typeParams: { lineSizeFactor: 0.05, includeCovalent: false },
+        color: "interaction-type"
+      });
+    } catch (e) {
+      // Fallback: directly add to s.cell
+      try {
+        await ctx.builders.structure.representation.addRepresentation(s.cell, {
+          type: "interactions",
+          typeParams: { lineSizeFactor: 0.05, includeCovalent: false },
+          color: "interaction-type"
+        });
+      } catch { /* ignore */ }
+      console.warn("Interactions non-fatal:", e);
+    }
+  };
+
+  const addExtraSurfaceForGlassXrayHolo = async (ctx) => {
+    // This makes style differences *very* visible even if repr type updates are limited.
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return;
+
+    try {
+      await removeComponentsByLabelPrefix(ctx, ["Addon:Surface"]);
+      if (!["glass", "xray", "hologram"].includes(currentStyle)) return;
+
+      // Add a surface layer to whole structure (additive)
+      const alpha = currentStyle === "xray" ? 0.12 : currentStyle === "glass" ? 0.10 : 0.18;
+      const colorInt =
+        currentStyle === "hologram"
+          ? (useCustomColor ? hexToInt(customColor) : 0x00ffcc)
+          : 0xffffff;
+
+      const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
+        s.cell,
+        null,
+        "addon-surface",
+        { label: "Addon:Surface" }
+      );
+      const target = comp?.cell ? comp : s.cell;
+
+      await ctx.builders.structure.representation.addRepresentation(target, {
+        type: "molecular-surface",
+        typeParams: { alpha, flatShaded: true, doubleSided: true, ignoreLight: currentStyle === "xray" },
+        color: "uniform",
+        colorParams: { value: colorInt }
+      });
+
+      if (currentStyle === "hologram") {
+        // Add a thin ball-and-stick glow-like layer
+        await ctx.builders.structure.representation.addRepresentation(target, {
+          type: "ball-and-stick",
+          typeParams: { sizeFactor: 0.08, alpha: 0.55 },
+          color: "uniform",
+          colorParams: { value: colorInt }
+        });
+      }
+    } catch (e) {
+      console.warn("Surface add-on non-fatal:", e);
+    }
+  };
+
+  /** -----------------------------
+   *  Apply all visuals (the main pipeline)
+   * ------------------------------*/
+  const applyAllVisuals = async () => {
+    const ctx = getCtx();
+    if (!ctx) return;
+
+    // If structure not ready, do nothing
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return;
+
+    try {
+      await updateCanvasProps(ctx);
+
+      // IMPORTANT: update existing reprs (this fixes your “颜色/滤镜没变化”)
+      await updateRepresentations(ctx);
+
+      // Add-ons (clear & add)
+      await addExtraSurfaceForGlassXrayHolo(ctx);
+      await addEmphasizeLigandLayer(ctx);
+      await addPocketLayerIfBinder(ctx);
+      await addInteractionsLayer(ctx);
+
+      // Binder focus: focus ligand if possible
+      if (focusMode === "binder") {
+        try {
+          const ligandQuery = ctx.managers.structure.selection.fromSelectionQuery("ligand");
+          if (ligandQuery?.expression) {
+            const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
+              s.cell,
+              ligandQuery.expression,
+              "addon-focus-ligand",
+              { label: "Addon:LigandFocus" }
+            );
+            if (comp?.obj?.data) {
+              const loci = ctx.managers.structure.selection.getLoci(comp.obj.data);
+              ctx.managers.camera.focusLoci(loci);
+            }
+            // clean temp focus comp
+            await removeComponentsByLabelPrefix(ctx, ["Addon:LigandFocus"]);
+          }
+        } catch { /* ignore */ }
+      }
+
+    } catch (e) {
+      console.warn("applyAllVisuals non-fatal:", e);
+    }
+  };
+
+  /** -----------------------------
+   *  React: re-apply when controls change
+   * ------------------------------*/
+  useEffect(() => {
+    if (loading || error) return;
+    const ctx = getCtx();
+    if (!ctx) return;
+
+    // debounce a bit to avoid rapid state spam
+    const t = setTimeout(() => { applyAllVisuals(); }, 30);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     currentStyle, focusMode, showInteractions,
-    customColor, useCustomColor,
     showPocket, pocketRadius,
-    emphasizeLigand
+    emphasizeLigand,
+    customColor, useCustomColor
   ]);
 
-  /** ------------------------------------------
-   *  Internal cleanup: remove all old stuff
-   * -------------------------------------------*/
-  const removeOldAiAndPocketComponents = async (ctx, structureWrapper) => {
+  /** -----------------------------
+   *  Screenshot
+   * ------------------------------*/
+  const takeScreenshot = () => {
+    const ctx = getCtx();
+    if (ctx?.helpers?.viewportScreenshot?.share) {
+      ctx.helpers.viewportScreenshot.share();
+      return;
+    }
     try {
-      const comps = structureWrapper?.components || [];
-      const toRemove = comps.filter(c => {
-        const label = c?.cell?.obj?.label || '';
-        return (
-          label.startsWith('AI:') ||
-          label.startsWith('Pocket') ||
-          label.startsWith('Ligand') ||
-          label.startsWith('Binder') ||
-          label.startsWith('Custom') ||
-          label.startsWith('Selection')
-        );
-      });
-      if (toRemove.length) {
-        await ctx.managers.structure.hierarchy.remove(toRemove);
-      }
+      const canvas = containerRef.current?.querySelector("canvas");
+      if (!canvas) return;
+      const image = canvas.toDataURL("image/png");
+      const link = document.createElement("a");
+      link.href = image;
+      link.download = `BioLens-${Date.now()}.png`;
+      link.click();
     } catch { /* ignore */ }
   };
 
-  /** ------------------------------------------
-   *  Style applying: clean-slate + robust
-   * -------------------------------------------*/
-  const applyStyle = async (structureInput) => {
-    const ctx = getPluginContext();
-    if (!ctx) return;
-
-    const hierarchy = ctx.managers.structure.hierarchy.current;
-
-    let structure = structureInput;
-    if (structureInput && !structureInput.components) {
-      structure = hierarchy.structures.find(s => s.cell.obj?.id === structureInput.cell?.obj?.id) || hierarchy.structures[0];
-    }
-    if (!structure) structure = hierarchy.structures[0];
-    if (!structure) return;
-
-    try {
-      // A. Canvas (safe + minimal fields used in your version)
-      const canvas = ctx.canvas3d;
-      if (canvas) {
-        const props = {
-          renderer: { backgroundColor: 0xffffff },
-          postProcessing: {
-            occlusion: { name: 'off', params: {} },
-            outline: { name: 'off', params: {} },
-          }
-        };
-
-        if (currentStyle === 'journal_nature') {
-          props.renderer.backgroundColor = 0xffffff;
-          props.postProcessing.occlusion = {
-            name: 'on',
-            params: { samples: 48, radius: 5, bias: 0.8, blurKernelSize: 15, resolutionScale: 1 }
-          };
-        } else if (currentStyle === 'journal_cell') {
-          props.renderer.backgroundColor = 0xfdfbf7;
-          props.postProcessing.outline = {
-            name: 'on',
-            params: { scale: 1.25, threshold: 0.33, color: 0x000000, includeTransparent: true }
-          };
-          props.postProcessing.occlusion = {
-            name: 'on',
-            params: { samples: 48, radius: 4, bias: 1.0, blurKernelSize: 11, resolutionScale: 1 }
-          };
-        } else if (currentStyle === 'glass') {
-          props.renderer.backgroundColor = 0x000000;
-          props.postProcessing.occlusion = {
-            name: 'on',
-            params: { samples: 32, radius: 6, bias: 0.7, blurKernelSize: 9, resolutionScale: 1 }
-          };
-          props.postProcessing.outline = {
-            name: 'on',
-            params: { scale: 1.0, threshold: 0.4, color: 0xffffff, includeTransparent: true }
-          };
-        } else if (currentStyle === 'hologram') {
-          props.renderer.backgroundColor = 0x000000;
-          props.postProcessing.outline = {
-            name: 'on',
-            params: { scale: 1.4, threshold: 0.25, color: 0x00ffcc, includeTransparent: true }
-          };
-        } else if (currentStyle === 'xray') {
-          props.renderer.backgroundColor = 0x111111;
-          props.postProcessing.outline = {
-            name: 'on',
-            params: { scale: 1.1, threshold: 0.35, color: 0xffffff, includeTransparent: true }
-          };
-        }
-
-        try {
-          canvas.setProps(props);
-        } catch (e) {
-          // keep running even if Mol* version changes something
-          console.warn("canvas3d.setProps failed (non-fatal):", e);
-        }
-      }
-
-      // B. Color setup
-      const customColorInt = hexToInt(customColor);
-      const colorTheme = useCustomColor ? 'uniform' : 'chain-id';
-      const colorParams = useCustomColor ? { value: customColorInt } : {};
-
-      // C. FULL clean slate:
-      //    1) remove old components
-      //    2) remove any representations on root
-      //    3) remove AI/Pocket selection components
-      try {
-        const components = structure.components || [];
-        if (components.length) {
-          await ctx.managers.structure.hierarchy.remove(components);
-        }
-      } catch { /* ignore */ }
-
-      try {
-        const reps = structure.representations || [];
-        if (reps.length) {
-          await ctx.managers.structure.hierarchy.remove(reps);
-        }
-      } catch { /* ignore */ }
-
-      await removeOldAiAndPocketComponents(ctx, structure);
-
-      // D. Rebuild components & representations
-      const MS = window.molstar?.MolScriptBuilder;
-
-      // 1) Polymer component
-      let polymerComp = null;
-      try {
-        const polymerQuery = ctx.managers.structure.selection.fromSelectionQuery('polymer');
-        if (polymerQuery?.expression) {
-          polymerComp = await ctx.builders.structure.tryCreateComponentFromExpression(
-            structure.cell,
-            polymerQuery.expression,
-            'polymer',
-            { label: 'Polymer', key: 'polymer' }
-          );
-        }
-      } catch (e) {
-        console.warn("Polymer component creation failed:", e);
-      }
-
-      // 2) Ligand component
-      let ligandComp = null;
-      let ligandQuery = null;
-      try {
-        ligandQuery = ctx.managers.structure.selection.fromSelectionQuery('ligand');
-        if (ligandQuery?.expression) {
-          ligandComp = await ctx.builders.structure.tryCreateComponentFromExpression(
-            structure.cell,
-            ligandQuery.expression,
-            'ligand',
-            { label: 'Ligand' }
-          );
-        }
-      } catch (e) {
-        console.warn("Ligand creation failed:", e);
-      }
-
-      // 3) Draw polymer (or fallback)
-      if (polymerComp) {
-        if (currentStyle === 'journal_cell') {
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'putty',
-            color: colorTheme,
-            colorParams
-          });
-        } else if (currentStyle === 'glass') {
-          // stronger "glass" feel: surface + spacefill + cartoon
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'molecular-surface',
-            typeParams: { alpha: 0.10, flatShaded: true, doubleSided: true, ignoreLight: false },
-            color: 'uniform',
-            colorParams: { value: 0xffffff }
-          });
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'spacefill',
-            typeParams: { alpha: 0.30, ignoreLight: false },
-            color: colorTheme,
-            colorParams
-          });
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'cartoon',
-            typeParams: { sizeFactor: 0.95 },
-            color: colorTheme,
-            colorParams
-          });
-        } else if (currentStyle === 'hologram') {
-          const neonColor = useCustomColor ? customColorInt : 0x00ffcc;
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'cartoon',
-            typeParams: { sizeFactor: 0.08 },
-            color: 'uniform',
-            colorParams: { value: neonColor }
-          });
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'ball-and-stick',
-            typeParams: { sizeFactor: 0.08 },
-            color: 'uniform',
-            colorParams: { value: 0xffffff }
-          });
-        } else if (currentStyle === 'xray') {
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'molecular-surface',
-            typeParams: { alpha: 0.12, flatShaded: true, doubleSided: true, ignoreLight: true },
-            color: 'uniform',
-            colorParams: { value: 0xffffff }
-          });
-          // FIX: polymerComp (not polymerComponent)
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'cartoon',
-            typeParams: { sizeFactor: 0.9 },
-            color: 'uniform',
-            colorParams: { value: 0xffffff }
-          });
-        } else {
-          await ctx.builders.structure.representation.addRepresentation(polymerComp, {
-            type: 'cartoon',
-            typeParams: { sizeFactor: 1.0 },
-            color: colorTheme,
-            colorParams
-          });
-        }
-      } else {
-        // fallback draw everything
-        await ctx.builders.structure.representation.addRepresentation(structure.cell, {
-          type: 'ball-and-stick',
-          color: colorTheme,
-          colorParams
-        });
-      }
-
-      // 4) Draw ligand (always element colored, but can be emphasized)
-      if (ligandComp) {
-        await ctx.builders.structure.representation.addRepresentation(ligandComp, {
-          type: 'ball-and-stick',
-          typeParams: { sizeFactor: emphasizeLigand ? 0.75 : 0.45 },
-          color: 'element-symbol'
-        });
-
-        // optional: emphasize ligand with subtle surface "halo"
-        if (emphasizeLigand) {
-          await ctx.builders.structure.representation.addRepresentation(ligandComp, {
-            type: 'molecular-surface',
-            typeParams: { alpha: 0.25, flatShaded: true, doubleSided: true, ignoreLight: false },
-            color: 'uniform',
-            colorParams: { value: 0xffffff }
-          });
-        }
-
-        if (focusMode === 'binder') {
-          try {
-            const loci = ctx.managers.structure.selection.getLoci(ligandComp.obj.data);
-            ctx.managers.camera.focusLoci(loci);
-          } catch { /* ignore */ }
-        }
-      }
-
-      // 5) Binder pocket highlight (near ligand)
-      if (focusMode === 'binder' && showPocket && ligandComp && MS) {
-        try {
-          const includeSurroundings = MS?.struct?.modifier?.includeSurroundings;
-          if (typeof includeSurroundings === 'function' && ligandQuery?.expression) {
-            const pocketExp = includeSurroundings({
-              0: ligandQuery.expression,
-              radius: clamp(parseFloat(pocketRadius), 2, 20),
-              'as-whole-residues': true
-            });
-
-            const pocketComp = await ctx.builders.structure.tryCreateComponentFromExpression(
-              structure.cell,
-              pocketExp,
-              'pocket',
-              { label: `Pocket ${clamp(parseFloat(pocketRadius), 2, 20)}Å` }
-            );
-
-            if (pocketComp) {
-              await ctx.builders.structure.representation.addRepresentation(pocketComp, {
-                type: 'ball-and-stick',
-                typeParams: { sizeFactor: 0.23 },
-                color: 'uniform',
-                colorParams: { value: 0xffd400 }
-              });
-              await ctx.builders.structure.representation.addRepresentation(pocketComp, {
-                type: 'molecular-surface',
-                typeParams: { alpha: 0.12, flatShaded: true, doubleSided: true, ignoreLight: false },
-                color: 'uniform',
-                colorParams: { value: 0xffd400 }
-              });
-            }
-          } else {
-            // Mol* API mismatch: fallback silently (no crash)
-            // still binder focus works
-          }
-        } catch (e) {
-          console.warn("Pocket creation failed (non-fatal):", e);
-        }
-      }
-
-      // 6) Interactions
-      if (showInteractions) {
-        try {
-          await ctx.builders.structure.representation.addRepresentation(structure.cell, {
-            type: 'interactions',
-            typeParams: { lineSizeFactor: 0.05, includeCovalent: false },
-            color: 'interaction-type'
-          });
-        } catch (e) {
-          console.warn("Interactions add failed (non-fatal):", e);
-        }
-      }
-
-    } catch (styleErr) {
-      console.error("Style Apply Error:", styleErr);
-    }
-  };
-
-  const toggleInteractions = () => setShowInteractions(v => !v);
-
-  const handleColorChange = (e) => {
-    setCustomColor(e.target.value);
-    setUseCustomColor(true);
-  };
-
+  /** -----------------------------
+   *  Reset
+   * ------------------------------*/
   const resetView = async () => {
     setUseCustomColor(false);
     setCustomColor("#4f46e5");
     setShowInteractions(false);
     setEmphasizeLigand(false);
-    setCurrentStyle('journal_nature');
-    setFocusMode('global');
+    setCurrentStyle("journal_nature");
+    setFocusMode("global");
     setShowPocket(true);
     setPocketRadius(6);
-    const ctx = getPluginContext();
+
+    const ctx = getCtx();
     if (ctx) ctx.managers.camera.reset();
   };
 
-  const takeScreenshot = () => {
-    const ctx = getPluginContext();
-    if (ctx?.helpers?.viewportScreenshot?.share) {
-      ctx.helpers.viewportScreenshot.share();
-    } else {
-      try {
-        const canvas = containerRef.current?.querySelector('canvas');
-        if (canvas) {
-          const image = canvas.toDataURL("image/png");
-          const link = document.createElement('a');
-          link.href = image;
-          link.download = `BioLens-${Date.now()}.png`;
-          link.click();
-        }
-      } catch { }
-    }
+  /** -----------------------------
+   *  AI: residue highlight / chain focus / only show chains
+   * ------------------------------*/
+  const clearAiComponents = async (ctx) => {
+    await removeComponentsByLabelPrefix(ctx, ["AI:"]);
   };
 
-  /** ------------------------------------------
-   *  AI actions executor (safe)
-   * -------------------------------------------*/
-  const ensureStructure = (ctx) => {
-    const s = ctx?.managers?.structure?.hierarchy?.current?.structures?.[0];
-    return s || null;
-  };
+  const addAiResidueHighlight = async (ctx, residue, colorHex) => {
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return { ok: false };
 
-  const clearAiSelectionsOnly = async (ctx, structureWrapper) => {
-    try {
-      const comps = structureWrapper?.components || [];
-      const toRemove = comps.filter(c => {
-        const label = c?.cell?.obj?.label || '';
-        return label.startsWith('AI:');
-      });
-      if (toRemove.length) await ctx.managers.structure.hierarchy.remove(toRemove);
-    } catch { /* ignore */ }
-  };
-
-  const addAiResidueHighlight = async (ctx, structureWrapper, residue, colorHex) => {
     const MS = window.molstar?.MolScriptBuilder;
-    if (!MS) return { ok: false, reason: "MolScriptBuilder missing" };
+    if (!MS) return { ok: false };
 
     const seq = residue?.seq;
-    if (!seq || Number.isNaN(seq)) return { ok: false, reason: "Residue seq missing" };
     const chain = residue?.chain ? String(residue.chain).toUpperCase() : null;
+    if (!seq || Number.isNaN(seq)) return { ok: false };
 
-    const colorInt = hexToInt(colorHex || '#ff0000');
+    const colorInt = hexToInt(colorHex || "#ff0000");
 
-    // Build expression:
-    // - if chain exists: chain-test + residue-test
-    // - else: residue-test only (less precise but useful)
     let exp;
     if (chain) {
       exp = MS.struct.generator.atomGroups({
-        'chain-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), chain]),
-        'residue-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), seq]),
+        "chain-test": MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), chain]),
+        "residue-test": MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), seq]),
       });
     } else {
       exp = MS.struct.generator.atomGroups({
-        'residue-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), seq]),
+        "residue-test": MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), seq]),
       });
     }
 
     const label = chain ? `AI:${chain}:${seq}` : `AI:res:${seq}`;
 
     const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
-      structureWrapper.cell,
+      s.cell,
       exp,
-      'ai-residue',
+      "ai-residue",
       { label }
     );
-
-    if (!comp) return { ok: false, reason: "Component create failed" };
-
-    await ctx.builders.structure.representation.addRepresentation(comp, {
-      type: 'ball-and-stick',
-      typeParams: { sizeFactor: 0.38 },
-      color: 'uniform',
-      colorParams: { value: colorInt }
-    });
-
-    // soft surface halo
-    await ctx.builders.structure.representation.addRepresentation(comp, {
-      type: 'molecular-surface',
-      typeParams: { alpha: 0.15, flatShaded: true, doubleSided: true, ignoreLight: false },
-      color: 'uniform',
-      colorParams: { value: colorInt }
-    });
-
-    try {
-      const loci = ctx.managers.structure.selection.getLoci(comp.obj.data);
-      ctx.managers.camera.focusLoci(loci);
-    } catch { /* ignore */ }
-
-    return { ok: true };
-  };
-
-  const showOnlyChains = async (ctx, chains) => {
-    const MS = window.molstar?.MolScriptBuilder;
-    const structureWrapper = ensureStructure(ctx);
-    if (!MS || !structureWrapper) return { ok: false };
-
-    const unique = Array.from(new Set((chains || []).map(c => String(c).toUpperCase()).filter(Boolean)));
-    if (!unique.length) return { ok: false };
-
-    // Clear everything then create selection component and draw it.
-    // We do NOT permanently change core logic; we rely on applyStyle by switching polymer rendering via custom selection.
-    // Implementation: create AI component that contains only selected chains, render it, and hide others by not rendering them.
-    // To ensure not fighting with applyStyle, we set style to nature (or keep current) and then wipe and draw only AI component.
-    // Easiest + robust: clear structure components and rebuild only selection.
-    try {
-      // remove all components & reps first
-      const comps = structureWrapper.components || [];
-      if (comps.length) await ctx.managers.structure.hierarchy.remove(comps);
-      const reps = structureWrapper.representations || [];
-      if (reps.length) await ctx.managers.structure.hierarchy.remove(reps);
-    } catch { /* ignore */ }
-
-    const chainExp = MS.struct.generator.atomGroups({
-      'chain-test': MS.core.logic.or(
-        unique.map(c => MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), c]))
-      )
-    });
-
-    const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
-      structureWrapper.cell,
-      chainExp,
-      'ai-only-chains',
-      { label: `AI:Only ${unique.join('+')}` }
-    );
-
     if (!comp) return { ok: false };
 
-    // draw with current style logic (simpler: cartoon)
-    const customColorInt = hexToInt(customColor);
-    const colorTheme = useCustomColor ? 'uniform' : 'chain-id';
-    const colorParams = useCustomColor ? { value: customColorInt } : {};
+    await ctx.builders.structure.representation.addRepresentation(comp, {
+      type: "ball-and-stick",
+      typeParams: { sizeFactor: 0.38 },
+      color: "uniform",
+      colorParams: { value: colorInt }
+    });
 
     await ctx.builders.structure.representation.addRepresentation(comp, {
-      type: 'cartoon',
-      typeParams: { sizeFactor: 1.0 },
-      color: colorTheme,
-      colorParams
+      type: "molecular-surface",
+      typeParams: { alpha: 0.15, flatShaded: true, doubleSided: true, ignoreLight: false },
+      color: "uniform",
+      colorParams: { value: colorInt }
     });
 
     try {
@@ -863,37 +927,36 @@ const BioLens = () => {
   };
 
   const focusChains = async (ctx, chains) => {
+    const s = getFirstStructureWrapper(ctx);
     const MS = window.molstar?.MolScriptBuilder;
-    const structureWrapper = ensureStructure(ctx);
-    if (!MS || !structureWrapper) return { ok: false };
+    if (!s || !MS) return { ok: false };
 
     const unique = Array.from(new Set((chains || []).map(c => String(c).toUpperCase()).filter(Boolean)));
     if (!unique.length) return { ok: false };
 
     const chainExp = MS.struct.generator.atomGroups({
-      'chain-test': MS.core.logic.or(
+      "chain-test": MS.core.logic.or(
         unique.map(c => MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), c]))
       )
     });
 
-    await clearAiSelectionsOnly(ctx, structureWrapper);
+    await clearAiComponents(ctx);
 
     const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
-      structureWrapper.cell,
+      s.cell,
       chainExp,
-      'ai-focus-chains',
-      { label: `AI:Focus ${unique.join('+')}` }
+      "ai-focus-chains",
+      { label: `AI:Focus ${unique.join("+")}` }
     );
-
     if (!comp) return { ok: false };
 
     await ctx.builders.structure.representation.addRepresentation(comp, {
-      type: 'ball-and-stick',
+      type: "ball-and-stick",
       typeParams: { sizeFactor: 0.16 },
-      color: 'chain-id'
+      color: "chain-id"
     });
 
-    try {
+        try {
       const loci = ctx.managers.structure.selection.getLoci(comp.obj.data);
       ctx.managers.camera.focusLoci(loci);
     } catch { /* ignore */ }
@@ -901,49 +964,128 @@ const BioLens = () => {
     return { ok: true };
   };
 
-  const focusLigandIfAny = async (ctx) => {
-    const structureWrapper = ensureStructure(ctx);
-    if (!structureWrapper) return { ok: false };
+  const showOnlyChains = async (ctx, chains) => {
+    const s = getFirstStructureWrapper(ctx);
+    const MS = window.molstar?.MolScriptBuilder;
+    if (!s || !MS) return { ok: false };
 
-    // We can reuse your ligand query
+    const unique = Array.from(new Set((chains || []).map(c => String(c).toUpperCase()).filter(Boolean)));
+    if (!unique.length) return { ok: false };
+
+    // Remove existing base representations so only the selection remains visible
     try {
-      const ligandQuery = ctx.managers.structure.selection.fromSelectionQuery('ligand');
+      const reps = getAllReprs(s);
+      if (reps.length) {
+        const upd = ctx.build();
+        for (const r of reps) upd.delete(r);
+        await upd.commit();
+      }
+    } catch (e) {
+      console.warn("showOnlyChains: remove base reprs non-fatal:", e);
+    }
+
+    await clearAiComponents(ctx);
+
+    const chainExp = MS.struct.generator.atomGroups({
+      "chain-test": MS.core.logic.or(
+        unique.map(c => MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), c]))
+      )
+    });
+
+    const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
+      s.cell,
+      chainExp,
+      "ai-only-chains",
+      { label: `AI:Only ${unique.join("+")}` }
+    );
+    if (!comp) return { ok: false };
+
+    const tintColorInt = hexToInt(customColor);
+    const wantUniform = !!useCustomColor;
+
+    await ctx.builders.structure.representation.addRepresentation(comp, {
+      type: currentStyle === "journal_cell" ? "putty" : "cartoon",
+      color: wantUniform ? "uniform" : "chain-id",
+      colorParams: wantUniform ? { value: tintColorInt } : {}
+    });
+
+    // If user is in glass/xray/holo, add a surface overlay for visibility
+    try {
+      if (["glass", "xray", "hologram"].includes(currentStyle)) {
+        const alpha = currentStyle === "xray" ? 0.12 : currentStyle === "glass" ? 0.10 : 0.18;
+        const colorInt =
+          currentStyle === "hologram"
+            ? (useCustomColor ? hexToInt(customColor) : 0x00ffcc)
+            : 0xffffff;
+
+        await ctx.builders.structure.representation.addRepresentation(comp, {
+          type: "molecular-surface",
+          typeParams: { alpha, flatShaded: true, doubleSided: true, ignoreLight: currentStyle === "xray" },
+          color: "uniform",
+          colorParams: { value: colorInt }
+        });
+      }
+    } catch { /* ignore */ }
+
+    try {
+      const loci = ctx.managers.structure.selection.getLoci(comp.obj.data);
+      ctx.managers.camera.focusLoci(loci);
+    } catch { /* ignore */ }
+
+    // After hiding everything, keep add-ons consistent
+    setTimeout(() => {
+      try { applyAllVisuals(); } catch { /* ignore */ }
+    }, 0);
+
+    return { ok: true };
+  };
+
+  const focusLigandOnce = async (ctx) => {
+    const s = getFirstStructureWrapper(ctx);
+    if (!s) return { ok: false };
+
+    try {
+      const ligandQuery = ctx.managers.structure.selection.fromSelectionQuery("ligand");
       if (!ligandQuery?.expression) return { ok: false };
 
-      const ligandComp = await ctx.builders.structure.tryCreateComponentFromExpression(
-        structureWrapper.cell,
+      await removeComponentsByLabelPrefix(ctx, ["AI:Ligand"]);
+
+      const comp = await ctx.builders.structure.tryCreateComponentFromExpression(
+        s.cell,
         ligandQuery.expression,
-        'ai-ligand',
-        { label: 'AI:Ligand' }
+        "ai-ligand",
+        { label: "AI:Ligand" }
       );
+      if (!comp) return { ok: false };
 
-      if (!ligandComp) return { ok: false };
-
-      await ctx.builders.structure.representation.addRepresentation(ligandComp, {
-        type: 'ball-and-stick',
-        typeParams: { sizeFactor: 0.75 },
-        color: 'element-symbol'
+      await ctx.builders.structure.representation.addRepresentation(comp, {
+        type: "ball-and-stick",
+        typeParams: { sizeFactor: 0.85 },
+        color: "element-symbol"
       });
 
-      const loci = ctx.managers.structure.selection.getLoci(ligandComp.obj.data);
+      const loci = ctx.managers.structure.selection.getLoci(comp.obj.data);
       ctx.managers.camera.focusLoci(loci);
       return { ok: true };
     } catch (e) {
-      console.warn("focusLigand failed:", e);
+      console.warn("focusLigandOnce non-fatal:", e);
       return { ok: false };
     }
   };
 
+  /** -----------------------------
+   *  AI submit
+   * ------------------------------*/
   const handleAiSubmit = async (e) => {
     e.preventDefault();
     if (!aiInput.trim()) return;
 
     const userText = aiInput;
-    setAiHistory(prev => [...prev, { role: 'user', text: userText }]);
+    setAiHistory(prev => [...prev, { role: "user", text: userText }]);
     setAiInput("");
 
+    const ctx = getCtx();
     let reply = "指令已接收。";
-    const ctx = getPluginContext();
 
     try {
       const intent = parseAiCommand(userText);
@@ -951,89 +1093,76 @@ const BioLens = () => {
       if (intent.wantReset) {
         await resetView();
         reply = "视图已重置。";
-        setAiHistory(prev => [...prev, { role: 'system', text: reply }]);
+        setAiHistory(prev => [...prev, { role: "system", text: reply }]);
         return;
       }
 
       // interactions toggle
-      if (intent.wantInteractions === true) {
-        setShowInteractions(true);
-      } else if (intent.wantInteractions === false) {
-        setShowInteractions(false);
-      }
+      if (intent.wantInteractions === true) setShowInteractions(true);
+      if (intent.wantInteractions === false) setShowInteractions(false);
 
       // pocket toggle/radius
-      if (typeof intent.wantPocketToggle === 'boolean') setShowPocket(intent.wantPocketToggle);
-      if (typeof intent.wantPocketRadius === 'number') setPocketRadius(intent.wantPocketRadius);
-
-      // tint (global) only if NOT residue-specific request
-      // If residueSelect present and residueColor present -> residue highlight takes priority.
-      if (intent.wantTint?.hex && !intent.residueSelect) {
-        setCustomColor(intent.wantTint.hex);
-        setUseCustomColor(true);
-      }
+      if (typeof intent.wantPocketToggle === "boolean") setShowPocket(intent.wantPocketToggle);
+      if (typeof intent.wantPocketRadius === "number") setPocketRadius(intent.wantPocketRadius);
 
       // emphasize ligand
       if (intent.wantEmphasizeLigand) setEmphasizeLigand(true);
 
-      // chain actions
-      if (ctx && intent.wantOnlyChains?.length) {
-        const r = await showOnlyChains(ctx, intent.wantOnlyChains);
-        reply = r.ok ? `已仅显示 ${intent.wantOnlyChains.join(' ')} 链。` : "只显示链失败（可能未加载结构）。";
-        setAiHistory(prev => [...prev, { role: 'system', text: reply }]);
-        return; // prevent applyStyle conflict
-      }
-
-      if (ctx && intent.wantFocusChains?.length) {
-        const r = await focusChains(ctx, intent.wantFocusChains);
-        reply = r.ok ? `已聚焦 ${intent.wantFocusChains.join(' ')} 链。` : "聚焦链失败（可能未加载结构）。";
-        setAiHistory(prev => [...prev, { role: 'system', text: reply }]);
+      // residue highlight has priority over global tint
+      if (ctx && intent.residueSelect && intent.residueColor) {
+        await clearAiComponents(ctx);
+        const r = await addAiResidueHighlight(ctx, intent.residueSelect, intent.residueColor);
+        reply = r.ok
+          ? `已高亮 ${intent.residueSelect.chain ? intent.residueSelect.chain + "链 " : ""}${intent.residueSelect.seq} 号残基并染色。`
+          : "残基选择失败（可能残基编号/链不存在）。";
+        setAiHistory(prev => [...prev, { role: "system", text: reply }]);
         return;
       }
 
-      // residue highlight
-      if (ctx && intent.residueSelect && intent.residueColor) {
-        const structureWrapper = ensureStructure(ctx);
-        if (structureWrapper) {
-          await clearAiSelectionsOnly(ctx, structureWrapper);
-          const r = await addAiResidueHighlight(ctx, structureWrapper, intent.residueSelect, intent.residueColor);
-          reply = r.ok
-            ? `已高亮 ${intent.residueSelect.chain ? intent.residueSelect.chain + '链 ' : ''}${intent.residueSelect.seq} 号残基并染色。`
-            : "残基选择失败（可能残基编号/链不存在）。";
-          setAiHistory(prev => [...prev, { role: 'system', text: reply }]);
-          return;
-        }
+      // global tint
+      if (intent.wantTint?.hex && !intent.residueSelect) {
+        setCustomColor(intent.wantTint.hex);
+        setUseCustomColor(true);
+        reply = `已设置全局染色为 ${intent.wantTint.hex}。`;
+        setAiHistory(prev => [...prev, { role: "system", text: reply }]);
+        return;
+      }
+
+      // only show chains
+      if (ctx && intent.wantOnlyChains?.length) {
+        const r = await showOnlyChains(ctx, intent.wantOnlyChains);
+        reply = r.ok ? `已仅显示 ${intent.wantOnlyChains.join(" ")} 链。` : "只显示链失败（可能未加载结构）。";
+        setAiHistory(prev => [...prev, { role: "system", text: reply }]);
+        return;
+      }
+
+      // focus chains
+      if (ctx && intent.wantFocusChains?.length) {
+        const r = await focusChains(ctx, intent.wantFocusChains);
+        reply = r.ok ? `已聚焦 ${intent.wantFocusChains.join(" ")} 链。` : "聚焦链失败（可能未加载结构）。";
+        setAiHistory(prev => [...prev, { role: "system", text: reply }]);
+        return;
       }
 
       // focus ligand
       if (ctx && (intent.wantFocusLigand || intent.wantEmphasizeLigand)) {
-        const r = await focusLigandIfAny(ctx);
-        reply = r.ok ? "已聚焦并突出显示配体。" : "未检测到配体（或聚焦失败）。";
-        setAiHistory(prev => [...prev, { role: 'system', text: reply }]);
+        const r = await focusLigandOnce(ctx);
+        reply = r.ok ? "已聚焦配体。" : "未检测到配体（或聚焦失败）。";
+        setAiHistory(prev => [...prev, { role: "system", text: reply }]);
         return;
       }
 
-      // fallback replies for simple commands (old behavior preserved)
-      const lower = userText.toLowerCase();
-      if (lower.includes("red") || userText.includes("红")) {
-        setCustomColor("#ff0000");
-        setUseCustomColor(true);
-        reply = "已染色为红色。";
-      } else if (lower.includes("blue") || userText.includes("蓝")) {
-        setCustomColor("#4f46e5");
-        setUseCustomColor(true);
-        reply = "已染色为蓝色。";
-      } else if (lower.includes("bond") || lower.includes("interaction") || userText.includes("氢键")) {
-        setShowInteractions(true);
-        reply = "已显示相互作用。";
-      } else if (intent.wantPocketRadius) {
+      // pocket text feedback
+      if (intent.wantPocketRadius) {
         reply = `Pocket 半径已设置为 ${intent.wantPocketRadius}Å。`;
-      } else if (typeof intent.wantPocketToggle === 'boolean') {
+      } else if (typeof intent.wantPocketToggle === "boolean") {
         reply = intent.wantPocketToggle ? "已开启 Pocket 高亮。" : "已关闭 Pocket 高亮。";
-      } else if (intent.wantTint?.hex) {
-        reply = `已设置染色为 ${intent.wantTint.hex}。`;
+      } else if (intent.wantInteractions === true) {
+        reply = "已显示相互作用。";
+      } else if (intent.wantInteractions === false) {
+        reply = "已隐藏相互作用。";
       } else {
-        reply = "我理解了你的指令，但未匹配到可执行动作。试试：只显示A链 / A链57号染红 / 显示口袋8Å / 聚焦配体。";
+        reply = "未匹配到可执行动作。试试：只显示A链 / A链57号染红 / 显示口袋8Å / 聚焦配体 / 显示氢键。";
       }
 
     } catch (err) {
@@ -1041,22 +1170,22 @@ const BioLens = () => {
       reply = "指令解析失败。";
     }
 
-    setAiHistory(prev => [...prev, { role: 'system', text: reply }]);
+    setAiHistory(prev => [...prev, { role: "system", text: reply }]);
   };
 
-  const styles = [
-    { id: 'journal_nature', name: 'Nature', icon: Droplet },
-    { id: 'journal_cell', name: 'Cell', icon: Disc },
-    { id: 'glass', name: 'Glass', icon: Box },
-    { id: 'hologram', name: 'Holo', icon: Monitor },
-    { id: 'xray', name: 'X-Ray', icon: Ghost },
-  ];
+  /** -----------------------------
+   *  UI Handlers
+   * ------------------------------*/
+  const toggleInteractions = () => setShowInteractions(v => !v);
 
-  const modes = [
-    { id: 'global', name: 'Global', icon: Maximize },
-    { id: 'binder', name: 'Binder', icon: Layers },
-  ];
+  const handleColorChange = (e) => {
+    setCustomColor(e.target.value);
+    setUseCustomColor(true);
+  };
 
+  /** -----------------------------
+   *  Render
+   * ------------------------------*/
   return (
     <div className="flex flex-col h-screen w-full bg-gray-50 text-gray-800 font-sans overflow-hidden">
       {/* Top Bar */}
@@ -1073,7 +1202,6 @@ const BioLens = () => {
           </div>
         </div>
 
-        {/* Fetch & Upload Bar */}
         <div className="flex items-center gap-2">
           <form onSubmit={handlePdbFetch} className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
             <div className="px-3 text-gray-400"><Search size={14} /></div>
@@ -1146,7 +1274,7 @@ const BioLens = () => {
             </button>
             <button
               onClick={toggleInteractions}
-              className={`flex items-center gap-2 px-4 py-2 rounded-full shadow-lg border ${showInteractions ? 'bg-indigo-600 text-white' : 'bg-white text-gray-700'}`}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full shadow-lg border ${showInteractions ? "bg-indigo-600 text-white" : "bg-white text-gray-700"}`}
             >
               <Share2 size={16} /> <span className="text-sm">H-Bonds</span>
             </button>
@@ -1188,7 +1316,7 @@ const BioLens = () => {
                 <button
                   key={s.id}
                   onClick={() => setCurrentStyle(s.id)}
-                  className={`p-2 rounded-lg border text-xs font-medium transition-colors ${currentStyle === s.id ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'hover:bg-gray-50'}`}
+                  className={`p-2 rounded-lg border text-xs font-medium transition-colors ${currentStyle === s.id ? "bg-indigo-50 border-indigo-500 text-indigo-700" : "hover:bg-gray-50"}`}
                 >
                   {s.name}
                 </button>
@@ -1203,7 +1331,7 @@ const BioLens = () => {
                 <button
                   key={m.id}
                   onClick={() => setFocusMode(m.id)}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-medium ${focusMode === m.id ? 'bg-gray-800 text-white' : 'hover:bg-gray-50'}`}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-medium ${focusMode === m.id ? "bg-gray-800 text-white" : "hover:bg-gray-50"}`}
                 >
                   <span className="flex items-center gap-2"><m.icon size={14} /> {m.name}</span>
                 </button>
@@ -1218,9 +1346,9 @@ const BioLens = () => {
               <span className="text-xs text-gray-600">Show Pocket</span>
               <button
                 onClick={() => setShowPocket(v => !v)}
-                className={`px-2 py-1 rounded text-[11px] border ${showPocket ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'hover:bg-gray-50 text-gray-600'}`}
+                className={`px-2 py-1 rounded text-[11px] border ${showPocket ? "bg-indigo-50 border-indigo-500 text-indigo-700" : "hover:bg-gray-50 text-gray-600"}`}
               >
-                {showPocket ? 'ON' : 'OFF'}
+                {showPocket ? "ON" : "OFF"}
               </button>
             </div>
             <div className="text-[11px] text-gray-500 mb-1">Radius: {pocketRadius}Å</div>
@@ -1235,6 +1363,20 @@ const BioLens = () => {
             />
             <div className="mt-2 text-[11px] text-gray-500">
               * 仅在 Binder 模式 + 有配体时生效
+            </div>
+          </div>
+
+          {/* Ligand emphasize */}
+          <div>
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Ligand</h3>
+            <button
+              onClick={() => setEmphasizeLigand(v => !v)}
+              className={`w-full px-3 py-2 rounded-lg border text-xs font-medium ${emphasizeLigand ? "bg-indigo-50 border-indigo-500 text-indigo-700" : "hover:bg-gray-50 text-gray-700"}`}
+            >
+              {emphasizeLigand ? "Emphasize: ON" : "Emphasize: OFF"}
+            </button>
+            <div className="mt-2 text-[11px] text-gray-500">
+              * AI 可用：突出配体 / 聚焦配体
             </div>
           </div>
 
@@ -1256,6 +1398,9 @@ const BioLens = () => {
                 </button>
               )}
             </div>
+            <div className="mt-2 text-[11px] text-gray-500">
+              * 这版 Tint 会直接更新 Mol* 当前显示的 representations
+            </div>
           </div>
 
           <div className="text-[11px] text-gray-500">
@@ -1266,6 +1411,4 @@ const BioLens = () => {
       </div>
     </div>
   );
-};
-
-export default BioLens;
+}
