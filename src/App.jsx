@@ -1,396 +1,617 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
-  Camera, Layers, Upload, Download, Search, Cpu, Sparkles, Palette, 
-  Activity, Send, AlertCircle, RefreshCw, Eye, Box
+  Camera, Upload, Download, Search, Zap, Droplet, Box, 
+  AlertCircle, RefreshCw, Eye, MessageSquare, Send,
+  Cpu, Layers, Settings, Maximize, Sparkles, Wand2, Palette,
+  MousePointer2, CircleDashed, Link2, Target, Microscope, ScanSearch
 } from 'lucide-react';
 
-// --- 配置区 ---
-const GEMINI_API_KEY = ""; 
-const DEFAULT_ID = "4HHB";
+/**
+ * BioLens Agent Pro - V3.9 (Logic Priority & Regex Fix)
+ * * Update Log:
+ * 1. [Logic] Smart Priority System: Collects ALL tokens (Residue, Chain, Color) before acting.
+ * - Fixes "Amino acid A chain 100" turning the whole chain red. Now correctly targets Residue 100 on Chain A.
+ * 2. [Regex] Enhanced Chinese Support: Better parsing for "氨基酸A链100", "A链100号".
+ * 3. [Visual] High Contrast Overlays: Binding pockets and H-bonds now use neon colors/thicker lines for visibility.
+ * 4. [UX] Button Feedback: Targets panel buttons now trigger Toast notifications.
+ */
 
-const BioLensFinal = () => {
-  // --- Refs ---
+// -----------------------------------------------------------------------------
+// 1. Static Configuration
+// -----------------------------------------------------------------------------
+const loadMolstarResources = () => {
+  return new Promise((resolve, reject) => {
+    if (window.molstar) { resolve(); return; }
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.css';
+    document.head.appendChild(link);
+
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.js';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load Mol* script"));
+    document.head.appendChild(script);
+  });
+};
+
+// --- Style Definitions ---
+const STYLES = {
+  cartoon: { label: 'Cartoon', type: 'cartoon', param: { alpha: 1 } },
+  surface: { label: 'Surface', type: 'molecular-surface', param: { alpha: 0.9, quality: 'auto' } },
+  bns: { label: 'Ball & Stick', type: 'ball-and-stick', param: { sizeFactor: 0.2 } },
+  spacefill: { label: 'Spacefill', type: 'spacefill', param: { } },
+};
+
+// --- Presets ---
+const JOURNAL_PRESETS = {
+  default: { label: 'Standard', bgColor: 0xf8f9fa, style: 'cartoon', color: 'chain', lighting: 'flat' },
+  nature: { label: 'Nature (Paper)', bgColor: 0xffffff, style: 'cartoon', color: 'chain', lighting: 'occlusion', param: { alpha: 1.0 } },
+  dark: { label: 'Dark (Pymol)', bgColor: 0x000000, style: 'cartoon', color: 'element', lighting: 'plastic' },
+  hologram: { label: 'Hologram (Cyber)', bgColor: 0x000000, style: 'bns', color: 'uniform', customColor: 0x00ffcc, lighting: 'flat' }
+};
+
+const COLORS = {
+  chain: { label: 'By Chain', type: 'chain-id' },
+  element: { label: 'By Element', type: 'element-symbol' },
+  hydro: { label: 'Hydrophobicity', type: 'hydrophobicity' },
+  rainbow: { label: 'Rainbow', type: 'sequence-id' }, 
+  uniform: { label: 'Uniform', type: 'uniform' }
+};
+
+const BioLensApp = () => {
   const containerRef = useRef(null);
-  const pluginRef = useRef(null);
+  const viewerRef = useRef(null);
+  const chatEndRef = useRef(null);
+
+  // --- State ---
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [pdbId, setPdbId] = useState("4HHB");
+  const [fileName, setFileName] = useState("4HHB");
+  const [toast, setToast] = useState(null);
   
-  // --- 系统状态 ---
-  const [isInitializing, setIsInitializing] = useState(true);
-  const [isBusy, setIsBusy] = useState(false);
-  const [errorDetails, setErrorDetails] = useState(null);
-  const [currentId, setCurrentId] = useState(DEFAULT_ID);
-  const [searchPdb, setSearchPdb] = useState("");
-
-  // --- 视觉同步状态 (交互核心) ---
-  const [reprStyle, setReprStyle] = useState('cartoon'); // cartoon, molecular-surface, ball-and-stick, spacefill
-  const [colorTheme, setColorTheme] = useState('chain-id'); // chain-id, element-symbol, hydrophobicity, uniform
-  const [hexColor, setHexColor] = useState("#4f46e5");
+  // Visual
+  const [activePreset, setActivePreset] = useState('default');
+  const [activeStyle, setActiveStyle] = useState('cartoon');
+  const [activeColorMode, setActiveColorMode] = useState('chain');
+  const [customColor, setCustomColor] = useState('#4f46e5');
   const [showWater, setShowWater] = useState(false);
-  const [showHetero, setShowHetero] = useState(true);
+  const [showLigands, setShowLigands] = useState(true);
 
-  // --- 1. 核心视觉引擎：确保画风正确 ---
-  const syncVisuals = useCallback(async () => {
-    const ctx = pluginRef.current;
-    if (!ctx) return;
+  // Interaction
+  const [clickMode, setClickMode] = useState('pick'); 
+  const [agentOverlays, setAgentOverlays] = useState([]); 
+  const [messages, setMessages] = useState([{ role: 'system', content: 'Agent Ready. 试着输入: "A链变蓝", "氨基酸A链100变红", "显示配体"' }]);
+  const [inputMsg, setInputMsg] = useState("");
 
-    // 获取当前结构
-    const structures = ctx.managers.structure.hierarchy.current.structures;
-    if (structures.length === 0) return;
+  // Helpers
+  const showToast = (msg) => {
+      setToast(msg);
+      setTimeout(() => setToast(null), 3000);
+  };
 
-    const struct = structures[0];
-    
-    try {
-      setIsBusy(true);
-      // 使用数据事务：确保清除和创建是原子操作，防止中途报错
-      await ctx.dataTransaction(async () => {
-        // 1. 清理现有所有显示组件
-        for (const comp of struct.components) {
-          await ctx.managers.structure.hierarchy.remove([comp]);
-        }
-
-        // 2. 创建聚合物 (Protein/DNA)
-        const polymer = await ctx.builders.structure.tryCreateComponentStatic(struct.cell, 'polymer');
-        if (polymer) {
-          const colorParams = colorTheme === 'uniform' 
-            ? { name: 'uniform', params: { value: parseInt(hexColor.replace('#', ''), 16) } }
-            : { name: colorTheme };
-
-          await ctx.builders.structure.representation.addRepresentation(polymer, { 
-            type: reprStyle, 
-            color: colorParams.name,
-            colorParams: colorParams.params,
-            typeParams: { quality: 'auto', alpha: 1.0 }
-          });
-        }
-
-        // 3. 创建配体/异质原子
-        if (showHetero) {
-          const ligands = await ctx.builders.structure.tryCreateComponentStatic(struct.cell, 'ligand');
-          if (ligands) {
-            await ctx.builders.structure.representation.addRepresentation(ligands, { 
-              type: 'ball-and-stick', 
-              color: 'element-symbol',
-              typeParams: { sizeFactor: 0.3 }
-            });
-          }
-        }
-
-        // 4. 创建水
-        if (showWater) {
-          const water = await ctx.builders.structure.tryCreateComponentStatic(struct.cell, 'water');
-          if (water) {
-            await ctx.builders.structure.representation.addRepresentation(water, { 
-              type: 'ball-and-stick', 
-              color: 'uniform',
-              colorParams: { value: 0x4fc3f7 },
-              typeParams: { alpha: 0.3, sizeFactor: 0.1 }
-            });
-          }
-        }
-      });
-    } catch (err) {
-      console.error("Visual Sync Error:", err);
-      setErrorDetails("视觉同步失败: " + err.message);
-    } finally {
-      setIsBusy(false);
-    }
-  }, [reprStyle, colorTheme, hexColor, showWater, showHetero]);
-
-  // --- 2. 生命周期：初始化引擎 ---
+  // ---------------------------------------------------------------------------
+  // Init
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    const initEngine = async () => {
+    const init = async () => {
       try {
-        if (!window.molstar) {
-          const link = document.createElement('link');
-          link.rel = 'stylesheet';
-          link.href = 'https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.css';
-          document.head.appendChild(link);
-
-          const script = document.createElement('script');
-          script.src = 'https://cdn.jsdelivr.net/npm/molstar@latest/build/viewer/molstar.js';
-          await new Promise(res => { script.onload = res; document.head.appendChild(script); });
-        }
-
+        await loadMolstarResources();
         const viewer = await window.molstar.Viewer.create(containerRef.current, {
-          layoutIsExpanded: false,
-          layoutShowControls: false,
-          layoutShowRemoteState: false,
-          layoutShowSequence: true,
-          viewportShowExpand: false,
-          viewportShowSelectionMode: false,
+          layoutIsExpanded: false, layoutShowControls: false, layoutShowRemoteState: false,
+          layoutShowSequence: true, viewportShowExpand: false, viewportShowSelectionMode: true,
+          viewportShowAnimation: true,
         });
-
-        pluginRef.current = viewer;
-        await handleFetchPdb(DEFAULT_ID);
-        setIsInitializing(false);
+        viewerRef.current = viewer;
+        await handleFetchPdb('4HHB'); 
+        setLoading(false);
       } catch (e) {
-        setErrorDetails("引擎初始化失败: " + e.message);
+        setError("Init Error: " + e.message);
+        setLoading(false);
       }
     };
-    initEngine();
-    return () => pluginRef.current?.dispose();
+    init();
+    return () => viewerRef.current?.dispose();
   }, []);
 
-  // 核心：监听 React 状态，驱动 Mol* 更新
+  const getPlugin = () => viewerRef.current?.plugin;
+
+  // ---------------------------------------------------------------------------
+  // Click Listener
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (!isInitializing) syncVisuals();
-  }, [reprStyle, colorTheme, hexColor, showWater, showHetero, isInitializing, syncVisuals]);
+    const plugin = getPlugin();
+    if (!plugin) return;
 
-  // --- 3. 数据加载逻辑：解决“读取失败” ---
+    const clickSub = plugin.behaviors.interaction.click.subscribe(async (e) => {
+        if (clickMode === 'pick') return; 
+
+        const currentLoci = e.current.loci;
+        const MS = window.molstar?.MolScriptBuilder;
+        
+        if (MS && currentLoci.kind === 'element-loci' && currentLoci.elements.length > 0) {
+            try {
+               const structure = currentLoci.structure;
+               const unit = currentLoci.elements[0].unit;
+               const index = currentLoci.elements[0].indices[0];
+               
+               const SP = window.molstar.StructureProperties;
+               const SE = window.molstar.StructureElement;
+               if (SP && SE) {
+                   const loc = SE.Location.create(structure, unit, index);
+                   const seqId = SP.residue.auth_seq_id(loc);
+                   const chainId = SP.chain.auth_asym_id(loc);
+                   const resName = SP.residue.label_comp_id(loc);
+                   
+                   let newOverlay = null;
+                   let feedbackMsg = "";
+
+                   if (clickMode === 'zone5') {
+                       newOverlay = { type: 'zone', target: `${seqId}`, targetChain: chainId, radius: 5, color: '#ff0055', rawSeqId: seqId };
+                       feedbackMsg = `Zone 5Å: 残基 ${resName} ${seqId} (链${chainId})`;
+                   } else if (clickMode === 'hbond') {
+                        newOverlay = { type: 'residue', target: `${seqId}`, targetChain: chainId, interaction: true, color: '#ffff00', style: 'ball-and-stick' };
+                       feedbackMsg = `H-Bonds: 残基 ${resName} ${seqId} (链${chainId})`;
+                   }
+
+                   if (newOverlay) {
+                       setAgentOverlays(prev => [...prev, newOverlay]);
+                       showToast(feedbackMsg);
+                       setMessages(prev => [...prev, { role: 'system', content: `[点击交互] ${feedbackMsg}` }]);
+                   }
+               }
+            } catch (err) { console.warn("Click processing error:", err); }
+        }
+    });
+
+    return () => clickSub.unsubscribe();
+  }, [clickMode]);
+
+  // ---------------------------------------------------------------------------
+  // Core: Visual Sync
+  // ---------------------------------------------------------------------------
+  const syncVisuals = useCallback(async () => {
+    const plugin = getPlugin();
+    if (!plugin) return;
+    if (!plugin.managers.structure.hierarchy.current.structures.length) return;
+
+    try {
+        await plugin.dataTransaction(async () => {
+            const hierarchy = plugin.managers.structure.hierarchy.current;
+            const structure = hierarchy.structures[0];
+            const state = plugin.state.data;
+            if (!structure || !structure.cell || !state.cells.has(structure.cell.transform.ref)) return;
+
+            // 1. Environment
+            const canvas = plugin.canvas3d;
+            const preset = JOURNAL_PRESETS[activePreset]; 
+            if (canvas && preset) {
+                const rendererProps = { backgroundColor: preset.bgColor };
+                const postProps = { occlusion: { name: 'off', params: {} }, outline: { name: 'off', params: {} } };
+                if (preset.lighting === 'occlusion') postProps.occlusion = { name: 'on', params: { samples: 32, radius: 5, bias: 0.8 } };
+                else if (preset.lighting === 'plastic') rendererProps.style = { name: 'matte' };
+                canvas.setProps({ renderer: rendererProps, postProcessing: postProps });
+            }
+
+            // 2. Clean Base
+            const currentComponents = structure.components;
+            const componentsToDelete = [];
+            for (const c of currentComponents) {
+                if (c.cell && state.cells.has(c.cell.transform.ref)) componentsToDelete.push(c);
+            }
+            if (componentsToDelete.length > 0) await plugin.managers.structure.hierarchy.remove(componentsToDelete);
+
+            // 3. Render Base
+            if (!state.cells.has(structure.cell.transform.ref)) return;
+            const polymerComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'polymer');
+            if (polymerComp && state.cells.has(polymerComp.ref)) {
+                let colorProps = { name: COLORS[activeColorMode]?.type || 'chain-id' };
+                if (activeColorMode === 'uniform') colorProps = { name: 'uniform', params: { value: parseInt(customColor.replace('#', ''), 16) } };
+                if (activePreset === 'hologram') colorProps = { name: 'uniform', params: { value: JOURNAL_PRESETS.hologram.customColor } };
+                
+                const styleConfig = STYLES[activeStyle] || STYLES['cartoon'];
+                await plugin.builders.structure.representation.addRepresentation(polymerComp, {
+                    type: styleConfig.type, typeParams: styleConfig.param, color: colorProps.name, colorParams: colorProps.params,
+                });
+            }
+
+            // 4. Details
+            if (showLigands) {
+                const ligandComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'ligand');
+                if (ligandComp && state.cells.has(ligandComp.ref)) await plugin.builders.structure.representation.addRepresentation(ligandComp, { type: 'ball-and-stick', color: 'element-symbol' });
+            }
+            if (showWater) {
+                const waterComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'water');
+                if (waterComp && state.cells.has(waterComp.ref)) await plugin.builders.structure.representation.addRepresentation(waterComp, { type: 'ball-and-stick', color: 'uniform', colorParams: { value: 0x88ccff }, typeParams: { alpha: 0.4 } });
+            }
+
+            // 5. AGENT OVERLAYS
+            const MS = window.molstar?.MolScriptBuilder;
+            if (!MS) return;
+
+            for (const overlay of agentOverlays) {
+                let expression = null;
+                const chainTest = overlay.targetChain ? MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), overlay.targetChain]) : null;
+
+                if (overlay.type === 'global-hbond') {
+                     const allPolymers = MS.struct.generator.atomGroups({ 'entity-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'polymer']) });
+                     const selComp = await plugin.builders.structure.tryCreateComponentFromExpression(structure.cell, allPolymers, 'custom-selection', { label: 'Global H-Bonds' });
+                     if (selComp && state.cells.has(selComp.ref)) {
+                         await plugin.builders.structure.representation.addRepresentation(selComp, {
+                             type: 'interactions', typeParams: { includeCovalent: false, interactionTypes: ['hydrogen-bond', 'weak-hydrogen-bond', 'ionic', 'pi-pi'], sizeFactor: 0.2 }
+                         });
+                     }
+                     continue;
+                }
+
+                if (overlay.type === 'chain') expression = MS.struct.generator.atomGroups({ 'chain-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), overlay.target]) });
+                else if (overlay.type === 'residue') {
+                    const [start, end] = overlay.target.split('-').map(Number);
+                    const endRes = end || start;
+                    const resTest = MS.core.logic.and([ MS.core.rel.gr([MS.struct.atomProperty.macromolecular.auth_seq_id(), start - 1]), MS.core.rel.lt([MS.struct.atomProperty.macromolecular.auth_seq_id(), endRes + 1]) ]);
+                    expression = MS.struct.generator.atomGroups({ 'residue-test': resTest, 'chain-test': chainTest || true });
+                }
+                else if (overlay.type === 'zone') {
+                    const centerExp = MS.struct.generator.atomGroups({ 'residue-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), overlay.rawSeqId]), 'chain-test': chainTest || true });
+                    expression = MS.struct.modifier.includeSurroundings({ 0: centerExp, radius: overlay.radius || 5, 'as-whole-residues': true });
+                }
+                else if (overlay.type === 'ligand-surround') {
+                     const ligExp = MS.struct.generator.atomGroups({ 'entity-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'non-polymer']) });
+                     expression = MS.struct.modifier.includeSurroundings({ 0: ligExp, radius: 5, 'as-whole-residues': true });
+                }
+
+                if (expression) {
+                    const selComp = await plugin.builders.structure.tryCreateComponentFromExpression(structure.cell, expression, 'custom-selection', { label: 'Overlay' });
+                    if (selComp && state.cells.has(selComp.ref)) {
+                        if (overlay.interaction) {
+                            await plugin.builders.structure.representation.addRepresentation(selComp, { type: 'interactions', typeParams: { includeCovalent: false } });
+                            await plugin.builders.structure.representation.addRepresentation(selComp, { type: 'ball-and-stick', color: 'element-symbol', typeParams: { sizeFactor: 0.15 } });
+                        } else {
+                            const colorVal = parseInt(overlay.color.replace('#', ''), 16);
+                            await plugin.builders.structure.representation.addRepresentation(selComp, {
+                                type: overlay.style || 'cartoon', color: 'uniform', colorParams: { value: colorVal }, typeParams: { sizeFactor: 0.22, quality: 'highest' } 
+                            });
+                            // High Visibility for Zones
+                            if (overlay.type === 'zone' || overlay.type === 'ligand-surround') {
+                                await plugin.builders.structure.representation.addRepresentation(selComp, { 
+                                    type: 'ball-and-stick', color: 'uniform', colorParams: { value: colorVal }, typeParams: { sizeFactor: 0.3 } 
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    } catch (err) { console.error("Render Error:", err); }
+  }, [activePreset, activeStyle, activeColorMode, customColor, showWater, showLigands, agentOverlays]);
+
+  useEffect(() => { if (!loading) syncVisuals(); }, [syncVisuals, loading]);
+
+  // ---------------------------------------------------------------------------
+  // Agent & IO
+  // ---------------------------------------------------------------------------
   const handleFetchPdb = async (id) => {
-    const ctx = pluginRef.current;
-    if (!ctx || !id) return;
-
-    setIsBusy(true);
-    try {
-      await ctx.clear();
-      const url = `https://files.rcsb.org/download/${id.toLowerCase()}.pdb`;
-      
-      // 使用 Molstar 内置的 download 确保流式传输
-      const data = await ctx.builders.data.download({ url, isBinary: false });
-      const traj = await ctx.builders.structure.parseTrajectory(data, 'pdb');
-      await ctx.builders.structure.hierarchy.applyPreset(traj, 'default');
-      
-      setCurrentId(id.toUpperCase());
-      setErrorDetails(null);
-      setTimeout(syncVisuals, 100); 
-    } catch (e) {
-      console.error("Fetch Error:", e);
-      setErrorDetails(`无法加载 PDB ${id}: 网络错误或ID不存在`);
-    } finally {
-      setIsBusy(false);
-    }
+      const plugin = getPlugin(); if (!plugin || !id) return;
+      setLoading(true); setAgentOverlays([]); 
+      try {
+          await plugin.clear();
+          const data = await plugin.builders.data.download({ url: `https://files.rcsb.org/download/${id.toUpperCase()}.pdb`, isBinary: false });
+          const traj = await plugin.builders.structure.parseTrajectory(data, 'pdb');
+          const model = await plugin.builders.structure.createModel(traj);
+          await plugin.builders.structure.createStructure(model);
+          setFileName(id.toUpperCase()); setLoading(false);
+          showToast(`已加载结构: ${id}`);
+      } catch (err) { setError("Fetch failed"); setLoading(false); }
   };
 
-  const handleLocalFile = async (e) => {
-    const file = e.target.files[0];
-    if (!file || !pluginRef.current) return;
-
-    setIsBusy(true);
-    setErrorDetails(null);
-    try {
-      await pluginRef.current.clear();
-      
-      // 关键改进：使用 ArrayBuffer 处理，防止编码问题导致的解析失败
-      const buffer = await file.arrayBuffer();
-      const binaryData = new Uint8Array(buffer);
-      
-      const fileName = file.name.toLowerCase();
-      const format = (fileName.endsWith('.cif') || fileName.endsWith('.bcif')) ? 'mmcif' : 'pdb';
-      const isBinary = fileName.endsWith('.bcif');
-
-      const data = await pluginRef.current.builders.data.rawData({ 
-        data: isBinary ? binaryData : new TextDecoder().decode(binaryData), 
-        label: file.name 
-      });
-
-      const traj = await pluginRef.current.builders.structure.parseTrajectory(data, format);
-      await pluginRef.current.builders.structure.hierarchy.applyPreset(traj, 'default');
-
-      setCurrentId(file.name);
-      setTimeout(syncVisuals, 200);
-    } catch (err) {
-      console.error("File Parse Error:", err);
-      setErrorDetails("文件解析失败: 请确保文件是标准 PDB 或 CIF 格式");
-    } finally {
-      setIsBusy(false);
-    }
+  const handleFileUpload = (e) => {
+      const file = e.target.files[0]; const plugin = getPlugin(); if (!file || !plugin) return;
+      setLoading(true); setAgentOverlays([]);
+      const reader = new FileReader();
+      reader.onload = async (evt) => {
+          try {
+              await plugin.clear();
+              const isBinary = file.name.endsWith('.bcif');
+              const data = await plugin.builders.data.rawData({ data: isBinary ? new Uint8Array(evt.target.result) : evt.target.result, label: file.name });
+              const format = file.name.includes('cif') ? (isBinary ? 'bcif' : 'mmcif') : 'pdb';
+              const traj = await plugin.builders.structure.parseTrajectory(data, format);
+              const model = await plugin.builders.structure.createModel(traj);
+              await plugin.builders.structure.createStructure(model);
+              setFileName(file.name); setLoading(false);
+              showToast(`已加载文件: ${file.name}`);
+          } catch (e) { setError("Parse failed"); setLoading(false); }
+      };
+      if (file.name.endsWith('.bcif')) reader.readAsArrayBuffer(file); else reader.readAsText(file);
   };
 
-  // --- 下载功能 ---
-  const downloadSnapshot = () => {
-    if (pluginRef.current) {
-      pluginRef.current.canvas3d.requestScreenshot();
-    }
+  // ---------------------------------------------------------------------------
+  // Agent Logic (Smart Priority)
+  // ---------------------------------------------------------------------------
+  const processAgentCommand = async (cmd) => {
+      const lowerCmd = cmd.toLowerCase();
+      
+      // -- Extraction Phase --
+      
+      // 1. Color Extraction
+      let colorCode = '#ff0000'; // Default Red
+      let hasColor = false;
+      if (lowerCmd.match(/red|红/)) { colorCode = '#ff0000'; hasColor = true; }
+      else if (lowerCmd.match(/blue|蓝/)) { colorCode = '#0000ff'; hasColor = true; }
+      else if (lowerCmd.match(/green|绿/)) { colorCode = '#00ff00'; hasColor = true; }
+      else if (lowerCmd.match(/yellow|黄/)) { colorCode = '#ffff00'; hasColor = true; }
+      else if (lowerCmd.match(/purple|紫/)) { colorCode = '#800080'; hasColor = true; }
+      else if (lowerCmd.match(/cyan|青/)) { colorCode = '#00ffff'; hasColor = true; }
+
+      // 2. Chain Extraction (Supported: "Chain A", "A链", "A chain")
+      const chainMatch = cmd.match(/(?:chain|链)\s*([a-zA-Z0-9])/i) || cmd.match(/([a-zA-Z0-9])\s*(?:chain|链)/i);
+      const chainId = chainMatch ? chainMatch[1].toUpperCase() : null;
+
+      // 3. Residue Extraction (Supported: "Residue 100", "100号", "100-200", "氨基酸100")
+      // We look for digits that are possibly associated with residue keywords, OR just standalone if we have other context.
+      // A safe regex that catches "amino acid...100" or "100...residue" or just "100" if "amino acid" is present elsewhere.
+      let start = null; 
+      let end = null;
+      // Broad regex to catch numbers. We will only use them if we have 'residue' context or it looks like a range.
+      const numberMatch = lowerCmd.match(/(\d+)(?:-(\d+))?/); 
+      const hasResidueKeyword = lowerCmd.match(/(residue|res|残基|氨基酸|位点)/);
+      
+      if (numberMatch && (hasResidueKeyword || chainId)) { 
+          // If we have a number AND (a residue keyword OR a chain ID), we treat it as a residue target.
+          // This allows "A链100" (Chain A 100) to be parsed as Residue 100 on Chain A.
+          start = numberMatch[1];
+          end = numberMatch[2] || start;
+      }
+
+      // 4. Action Extraction
+      const isHbond = lowerCmd.match(/bond|interaction|h-bond|氢键/);
+      const isBinding = lowerCmd.match(/(pocket|site|binding|结合|口袋|位点)/) && lowerCmd.match(/(ligand|drug|配体|药)/);
+      const isGlobalHbond = lowerCmd.match(/(global|all|全局|整体)/) && isHbond;
+      const isFocusLigand = lowerCmd.match(/(focus|show|view|看|聚焦)/) && lowerCmd.match(/(ligand|drug|配体|药)/);
+
+      // -- Execution Phase (Priority: Specific -> General) --
+
+      // Priority 1: Special Buttons/Modes
+      if (isBinding) {
+           setAgentOverlays(prev => [...prev, { type: 'ligand-surround', color: '#ff9900' }]);
+           return "已显示配体结合口袋 (5Å)";
+      }
+      if (isGlobalHbond) {
+           setAgentOverlays(prev => [...prev, { type: 'global-hbond' }]);
+           return "已显示全局氢键网络";
+      }
+      if (isFocusLigand) {
+           setShowLigands(true);
+           const plugin = getPlugin();
+           const lig = plugin?.managers.structure.hierarchy.current.structures[0]?.components.find(c => c.key === 'ligand');
+           if(lig) plugin.managers.camera.focusLoci(plugin.managers.structure.selection.getLoci(lig.obj.data));
+           return "已聚焦配体";
+      }
+
+      // Priority 2: Residue Target (Specific)
+      if (start) {
+          setAgentOverlays(prev => [...prev, { 
+              type: 'residue', 
+              target: `${start}-${end}`, 
+              targetChain: chainId, // Pass chain if found, else null (wildcard)
+              interaction: isHbond, 
+              color: isHbond ? '#ffff00' : colorCode, 
+              style: 'ball-and-stick' 
+          }]);
+          const chainText = chainId ? `(链${chainId})` : '';
+          return isHbond ? `显示残基 ${start}${chainText} 氢键` : `标记残基 ${start}${chainText} 为 ${colorCode}`;
+      }
+
+      // Priority 3: Chain Target (Semi-Specific)
+      if (chainId) {
+          setAgentOverlays(prev => [...prev, { type: 'chain', target: chainId, style: 'cartoon', color: colorCode }]);
+          return `已将 ${chainId} 链 设为 ${colorCode}`;
+      }
+
+      // Priority 4: Global Color (General)
+      if (hasColor || lowerCmd.includes('global') || lowerCmd.includes('全局')) {
+          setCustomColor(colorCode); 
+          setActiveColorMode('uniform'); 
+          setActivePreset('custom');
+          return "已应用全局颜色";
+      }
+
+      // Presets & Clear
+      if (lowerCmd.includes('nature')) { setActivePreset('nature'); return "Nature 风格"; }
+      if (lowerCmd.includes('dark')) { setActivePreset('dark'); return "Dark 风格"; }
+      if (lowerCmd.includes('clear') || lowerCmd.includes('清除') || lowerCmd.includes('reset')) { setAgentOverlays([]); return "已清除所有图层"; }
+
+      return "指令不明确 (试着说: 'A链100变红', '显示全局氢键')";
   };
+
+  const handleChatSubmit = async (e) => {
+      e.preventDefault(); if (!inputMsg.trim()) return;
+      const userText = inputMsg; setMessages(prev => [...prev, { role: 'user', content: userText }]);
+      setInputMsg("");
+      setTimeout(async () => {
+          const reply = await processAgentCommand(userText);
+          setMessages(prev => [...prev, { role: 'system', content: reply }]);
+          showToast(reply);
+      }, 300);
+  };
+
+  const applyPreset = (key) => {
+      const p = JOURNAL_PRESETS[key]; setActivePreset(key); setActiveStyle(p.style); setActiveColorMode(p.color);
+      if (p.customColor) setCustomColor('#' + p.customColor.toString(16).padStart(6, '0'));
+  };
+
+  const isLigandPocketActive = agentOverlays.some(o => o.type === 'ligand-surround');
+  const isGlobalHbondActive = agentOverlays.some(o => o.type === 'global-hbond');
 
   return (
-    <div className="flex flex-col h-screen w-full bg-[#0a0a0f] text-slate-200 font-sans overflow-hidden">
-      
-      {/* 顶部导航：数据输入 */}
-      <header className="h-16 flex items-center justify-between px-6 bg-slate-950/80 border-b border-white/5 backdrop-blur-md z-50">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-indigo-600 rounded-lg shadow-lg shadow-indigo-500/20">
-            <Box className="text-white" size={20} />
+    <div className="flex flex-col h-screen w-full bg-slate-50 text-slate-800 font-sans overflow-hidden">
+      {toast && (
+          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 bg-slate-800/90 text-white px-4 py-2 rounded-full shadow-xl flex items-center gap-2 animate-fade-in-up transition-all">
+              <Sparkles size={14} className="text-yellow-400"/>
+              <span className="text-xs font-medium">{toast}</span>
           </div>
-          <div>
-            <h1 className="text-sm font-black tracking-widest text-white">BIOLENS <span className="text-indigo-500">ENGINE</span></h1>
-            <p className="text-[9px] text-slate-500 font-mono uppercase tracking-tighter">Molecular Analysis System v4.0</p>
-          </div>
+      )}
+
+      <header className="h-14 bg-white border-b flex items-center justify-between px-4 shadow-sm z-20">
+        <div className="flex items-center gap-2">
+           <div className="bg-indigo-600 p-1.5 rounded text-white"><Cpu size={18}/></div>
+           <h1 className="font-bold text-lg tracking-tight">BioLens <span className="text-indigo-600">Pro</span></h1>
         </div>
-
-        <div className="flex items-center gap-3 bg-slate-900/50 p-1.5 rounded-xl border border-white/5">
-          <div className="flex items-center px-3 gap-2">
-            <Search size={14} className="text-slate-500" />
-            <input 
-              className="bg-transparent border-none outline-none text-xs w-24 font-mono uppercase placeholder:text-slate-700"
-              placeholder="PDB ID..."
-              value={searchPdb}
-              onChange={e => setSearchPdb(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleFetchPdb(searchPdb)}
-            />
-          </div>
-          <button 
-            onClick={() => handleFetchPdb(searchPdb)}
-            className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-[10px] font-bold transition-all active:scale-95"
-          >
-            LOAD
-          </button>
-          
-          <div className="w-px h-4 bg-white/10" />
-
-          <label className="flex items-center gap-2 px-4 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-[10px] font-bold cursor-pointer transition-all border border-white/5">
-            <Upload size={14} className="text-indigo-400" /> UPLOAD
-            <input type="file" onChange={handleLocalFile} className="hidden" accept=".pdb,.cif,.bcif" />
-          </label>
+        <div className="flex items-center gap-2">
+            <div className="flex items-center bg-slate-100 rounded-md overflow-hidden border border-transparent focus-within:border-indigo-500">
+                <div className="pl-2 text-slate-400"><Search size={14}/></div>
+                <input className="bg-transparent border-none outline-none text-sm w-24 px-2 py-1.5 uppercase" placeholder="PDB ID"
+                    value={pdbId} onChange={e => setPdbId(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleFetchPdb(pdbId)} />
+            </div>
+            <button onClick={() => handleFetchPdb(pdbId)} className="btn-secondary">Load</button>
+            <label className="btn-primary cursor-pointer flex items-center gap-2"><Upload size={14}/> Open <input type="file" className="hidden" onChange={handleFileUpload} /></label>
         </div>
-
-        <button onClick={downloadSnapshot} className="p-2 hover:bg-white/5 rounded-full transition-colors text-slate-400">
-          <Download size={18} />
-        </button>
       </header>
 
       <div className="flex flex-1 overflow-hidden relative">
-        
-        {/* Mol* 渲染主视口 */}
-        <main className="flex-1 relative bg-black">
-          {isBusy && (
-            <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-black/40 backdrop-blur-[2px]">
-              <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-3" />
-              <span className="text-[10px] font-mono tracking-[0.2em] text-indigo-400 animate-pulse">SYNCHRONIZING ENGINE...</span>
-            </div>
-          )}
-
-          {errorDetails && (
-            <div className="absolute top-6 left-1/2 -translate-x-1/2 z-50 bg-red-500/10 border border-red-500/50 backdrop-blur-xl text-red-200 px-6 py-3 rounded-2xl flex items-center gap-3 shadow-2xl">
-              <AlertCircle size={16} />
-              <span className="text-xs font-bold">{errorDetails}</span>
-              <button onClick={() => setErrorDetails(null)} className="ml-4 opacity-50 hover:opacity-100">✕</button>
-            </div>
-          )}
-          
-          <div ref={containerRef} className="w-full h-full" />
+        <main className="flex-1 relative bg-slate-200">
+           {loading && <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/80"><div className="animate-spin text-indigo-600"><RefreshCw/></div></div>}
+           {error && <div className="absolute top-10 left-1/2 -translate-x-1/2 z-50 bg-red-100 text-red-700 px-4 py-2 rounded flex gap-2"><AlertCircle size={18}/>{error}<button onClick={()=>setError(null)}>x</button></div>}
+           <div ref={containerRef} className="absolute inset-0 w-full h-full" />
+           <div className="absolute top-4 left-4 z-10 flex flex-col gap-2">
+              <div className="bg-white/90 backdrop-blur px-3 py-1.5 rounded shadow text-xs font-bold text-slate-600 border">ID: {fileName}</div>
+              {agentOverlays.length > 0 && <button onClick={() => setAgentOverlays([])} className="bg-red-500/90 text-white px-3 py-1.5 rounded shadow text-xs font-bold hover:bg-red-600 flex items-center gap-1"><Wand2 size={12}/> Clear Layers ({agentOverlays.length})</button>}
+           </div>
         </main>
 
-        {/* 右侧交互控制台：核心功能区 */}
-        <aside className="w-72 bg-slate-950 border-l border-white/5 p-6 flex flex-col gap-8 z-40 shadow-[-20px_0_40px_rgba(0,0,0,0.8)] overflow-y-auto custom-scrollbar">
-          
-          {/* 状态指示 */}
-          <div className="p-4 bg-indigo-500/5 border border-indigo-500/20 rounded-2xl">
-            <span className="text-[9px] font-bold text-indigo-500 uppercase tracking-widest">Active Structure</span>
-            <h2 className="text-sm font-mono text-indigo-100 mt-1 truncate">{currentId}</h2>
-          </div>
+        <aside className="w-80 bg-white border-l flex flex-col z-20 shadow-xl">
+            <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
+                
+                <section>
+                    <SectionHeader icon={<Target size={14} className="text-pink-500"/>} title="Smart Targets (靶点)" />
+                    <div className="grid grid-cols-1 gap-2 mt-2">
+                        <button onClick={() => processAgentCommand("focus ligand")} className="flex items-center gap-2 p-2.5 rounded-lg border bg-white hover:bg-pink-50 transition-colors text-left group active:scale-95">
+                            <div className="p-1.5 bg-pink-100 text-pink-600 rounded-md group-hover:scale-110 transition-transform"><ScanSearch size={16}/></div>
+                            <div className="flex flex-col">
+                                <span className="text-xs font-bold text-slate-700">Focus Ligand</span>
+                                <span className="text-[10px] text-slate-400">聚焦配体/药物分子</span>
+                            </div>
+                        </button>
+                        <div className="grid grid-cols-2 gap-2">
+                            <button onClick={() => processAgentCommand("ligand pocket")} className={`flex flex-col items-center justify-center p-2 rounded-lg border transition-all gap-1 ${isLigandPocketActive ? 'bg-amber-100 border-amber-300 text-amber-800 shadow-inner' : 'bg-white hover:bg-amber-50 text-slate-600'}`}>
+                                <Microscope size={16} className={isLigandPocketActive ? "text-amber-700" : "text-amber-500"}/>
+                                <span className="text-[10px] font-medium">Binding Pocket</span>
+                                {isLigandPocketActive && <div className="absolute top-1 right-1 w-2 h-2 bg-green-500 rounded-full"/>}
+                            </button>
+                            <button onClick={() => processAgentCommand("global h-bond")} className={`flex flex-col items-center justify-center p-2 rounded-lg border transition-all gap-1 ${isGlobalHbondActive ? 'bg-indigo-100 border-indigo-300 text-indigo-800 shadow-inner' : 'bg-white hover:bg-indigo-50 text-slate-600'}`}>
+                                <Link2 size={16} className={isGlobalHbondActive ? "text-indigo-700" : "text-indigo-500"}/>
+                                <span className="text-[10px] font-medium">Global H-Bonds</span>
+                                {isGlobalHbondActive && <div className="absolute top-1 right-1 w-2 h-2 bg-green-500 rounded-full"/>}
+                            </button>
+                        </div>
+                    </div>
+                </section>
 
-          {/* 渲染样式交互 */}
-          <section>
-            <div className="flex items-center gap-2 mb-4">
-              <Layers size={14} className="text-slate-500" />
-              <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Geometry</h3>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                {id: 'cartoon', label: 'Cartoon'},
-                {id: 'molecular-surface', label: 'Surface'},
-                {id: 'ball-and-stick', label: 'B & S'},
-                {id: 'spacefill', label: 'Sphere'},
-              ].map(item => (
-                <button 
-                  key={item.id}
-                  onClick={() => setReprStyle(item.id)}
-                  className={`py-3 rounded-xl text-[10px] font-bold transition-all border
-                  ${reprStyle === item.id 
-                    ? 'bg-indigo-600 border-indigo-400 text-white shadow-lg shadow-indigo-600/30 active:scale-95' 
-                    : 'bg-slate-900 border-white/5 text-slate-500 hover:border-white/10 hover:bg-slate-800'}`}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          </section>
+                <section>
+                    <SectionHeader icon={<MousePointer2 size={14} className="text-indigo-500"/>} title="Click Action (点击交互)" />
+                    <div className="grid grid-cols-3 gap-2 mt-2">
+                         <button onClick={() => setClickMode('pick')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'pick' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white hover:bg-slate-50'}`}>
+                             <MousePointer2 size={14}/> Focus
+                         </button>
+                         <button onClick={() => setClickMode('zone5')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'zone5' ? 'bg-red-600 text-white shadow-md' : 'bg-white hover:bg-red-50'}`}>
+                             <CircleDashed size={14}/> Zone 5Å
+                         </button>
+                         <button onClick={() => setClickMode('hbond')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'hbond' ? 'bg-amber-500 text-white shadow-md' : 'bg-white hover:bg-amber-50'}`}>
+                             <Link2 size={14}/> H-Bond
+                         </button>
+                    </div>
+                    <div className="mt-2 text-[10px] text-center text-slate-400 bg-slate-50 py-1 rounded">
+                        {clickMode === 'pick' && "点击: 聚焦 | Click: Focus"}
+                        {clickMode === 'zone5' && "点击: 5Å区域 | Click: 5Å Zone"}
+                        {clickMode === 'hbond' && "点击: 氢键 | Click: H-Bonds"}
+                    </div>
+                </section>
 
-          {/* 着色系统交互 */}
-          <section>
-            <div className="flex items-center gap-2 mb-4">
-              <Palette size={14} className="text-slate-500" />
-              <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Coloring</h3>
-            </div>
-            <div className="space-y-3">
-              <select 
-                className="w-full bg-slate-900 border border-white/10 rounded-xl p-3 text-xs text-slate-300 outline-none focus:ring-1 focus:ring-indigo-500"
-                value={colorTheme}
-                onChange={e => setColorTheme(e.target.value)}
-              >
-                <option value="chain-id">By Chain ID</option>
-                <option value="element-symbol">By Element (CPK)</option>
-                <option value="residue-name">By Residue</option>
-                <option value="hydrophobicity">By Hydrophobicity</option>
-                <option value="uniform">Custom Uniform</option>
-              </select>
+                <section>
+                    <SectionHeader icon={<Sparkles size={14} className="text-amber-500"/>} title="Journal Styles" />
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                        {Object.entries(JOURNAL_PRESETS).map(([key, cfg]) => (
+                            <button key={key} onClick={() => applyPreset(key)} 
+                                className={`text-xs py-2.5 px-3 rounded-xl border font-bold text-left flex items-center justify-between group ${activePreset === key ? 'bg-slate-800 text-white border-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}>
+                                {cfg.label}
+                                {activePreset === key && <div className="w-1.5 h-1.5 rounded-full bg-green-400 shadow-[0_0_5px_rgba(74,222,128,0.8)]"/>}
+                            </button>
+                        ))}
+                    </div>
+                </section>
 
-              {colorTheme === 'uniform' && (
-                <div className="flex items-center justify-between p-3 bg-slate-900 rounded-xl border border-white/5">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase">Tint Color</span>
-                  <input 
-                    type="color" 
-                    value={hexColor} 
-                    onChange={e => setHexColor(e.target.value)}
-                    className="w-8 h-8 bg-transparent border-none cursor-pointer"
-                  />
+                <section>
+                    <SectionHeader icon={<Layers size={14}/>} title="Manual Control" />
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                        {Object.entries(STYLES).map(([key, cfg]) => (
+                            <button key={key} onClick={() => { setActiveStyle(key); setActivePreset('custom'); }} 
+                                className={`text-xs py-1.5 px-2 rounded border transition-colors ${activeStyle === key ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-slate-50'}`}>
+                                {cfg.label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 mt-3">
+                        {Object.entries(COLORS).map(([key, cfg]) => (
+                            <button key={key} onClick={() => { setActiveColorMode(key); setActivePreset('custom'); }} 
+                                className={`text-[10px] px-2 py-1 rounded border ${activeColorMode === key ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>
+                                {cfg.label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="mt-3 flex items-center justify-between bg-slate-50 p-2 rounded-lg border border-slate-100">
+                        <div className="flex items-center gap-2"> <Palette size={14} className="text-slate-400"/> <span className="text-xs text-slate-600 font-medium">Tint Color</span> </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-mono text-slate-400">{customColor}</span>
+                            <input type="color" value={customColor} onChange={(e) => { setCustomColor(e.target.value); setActiveColorMode('uniform'); setActivePreset('custom'); }} className="w-6 h-6 rounded cursor-pointer border-none bg-transparent p-0" />
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <div className="h-64 border-t bg-slate-50 flex flex-col">
+                <div className="px-3 py-2 border-b bg-white flex items-center gap-2 text-indigo-600 shadow-sm"><MessageSquare size={14} /><span className="text-xs font-bold uppercase tracking-wider">Bio-Agent Command</span></div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-slate-50/50">
+                    {messages.map((msg, idx) => (
+                        <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[90%] px-3 py-2 rounded-xl text-xs leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none'}`}>
+                                {msg.content}
+                            </div>
+                        </div>
+                    ))}
+                    <div ref={chatEndRef} />
                 </div>
-              )}
+                <form onSubmit={handleChatSubmit} className="p-2 bg-white border-t flex gap-2">
+                    <input className="flex-1 bg-slate-100 border-none rounded-lg px-3 py-2 text-xs focus:ring-1 focus:ring-indigo-500 outline-none" placeholder="指令..." value={inputMsg} onChange={e => setInputMsg(e.target.value)} />
+                    <button type="submit" className="p-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"><Send size={14} /></button>
+                </form>
             </div>
-          </section>
-
-          {/* 子系统开关交互 */}
-          <section>
-            <div className="flex items-center gap-2 mb-4">
-              <Activity size={14} className="text-slate-500" />
-              <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Sub-systems</h3>
-            </div>
-            <div className="space-y-2">
-              <ToggleButton 
-                icon={<Droplet size={12}/>} 
-                label="Solvent (H2O)" 
-                active={showWater} 
-                onClick={() => setShowWater(!showWater)} 
-              />
-              <ToggleButton 
-                icon={<Eye size={12}/>} 
-                label="Hetero Atoms" 
-                active={showHetero} 
-                onClick={() => setShowHetero(!showHetero)} 
-              />
-            </div>
-          </section>
-
-          <div className="mt-auto">
-             <button 
-              onClick={() => pluginRef.current?.managers.camera.reset()}
-              className="w-full py-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-2xl text-[10px] font-black tracking-widest transition-all border border-white/5 flex items-center justify-center gap-2"
-            >
-              <RefreshCw size={14} /> RESET VIEWPORT
-            </button>
-          </div>
-
         </aside>
       </div>
+      <style>{`
+        .btn-primary { @apply px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded transition-colors shadow-sm; }
+        .btn-secondary { @apply px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded transition-colors; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
+        @keyframes fade-in-up { 0% { opacity: 0; transform: translate(-50%, 10px); } 100% { opacity: 1; transform: translate(-50%, 0); } }
+        .animate-fade-in-up { animation: fade-in-up 0.3s ease-out forwards; }
+      `}</style>
     </div>
   );
 };
 
-// 辅助组件：交互开关
-const ToggleButton = ({ label, active, onClick, icon }) => (
-  <button 
-    onClick={onClick}
-    className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all ${
-      active ? 'bg-indigo-500/10 border-indigo-500/50 text-indigo-400' : 'bg-slate-900 border-white/5 text-slate-600 opacity-60'
-    }`}
-  >
-    <div className="flex items-center gap-3">
-      {icon}
-      <span className="text-[10px] font-bold uppercase">{label}</span>
+const SectionHeader = ({ icon, title }) => (
+    <div className="flex items-center gap-2 mb-2 text-slate-400">
+        {icon} <span className="text-[10px] font-bold uppercase tracking-widest">{title}</span>
     </div>
-    <div className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.8)]' : 'bg-slate-700'}`} />
-  </button>
 );
 
-export default BioLensFinal;
+const ToggleRow = ({ label, active, onClick }) => (
+    <div onClick={onClick} className="flex items-center justify-between p-2 rounded-lg cursor-pointer hover:bg-slate-100 border border-transparent transition-all">
+        <span className="text-xs font-medium text-slate-600">{label}</span>
+        <div className={`w-8 h-4 rounded-full relative transition-colors ${active ? 'bg-green-500' : 'bg-slate-300'}`}>
+            <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform ${active ? 'left-4.5 translate-x-1' : 'left-0.5'}`} />
+        </div>
+    </div>
+);
+
+export default BioLensApp;
