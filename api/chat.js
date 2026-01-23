@@ -1,76 +1,125 @@
-// 这是一个运行在 Vercel 云端的后端代码
-// 只有在这里才能安全地调用通义千问/OpenAI
+// /pages/api/chat.js
+// Next.js Pages Router API Route (Vercel Serverless)
+// DeepSeek OpenAI-compatible API via fetch
+// Env: DEEPSEEK_API_KEY (required), DEEPSEEK_MODEL (optional, default deepseek-chat)
+
+const DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions";
+const MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+
+// ========== Prompts ==========
+const SYSTEM_PROMPT_ANSWER = `
+你是一个专业、简洁的生物结构可视化助手。用户会问问题，请直接用自然语言回答。
+`.trim();
+
+const SYSTEM_PROMPT_COMMAND = `
+你是一个“Mol* PDB 可视化指令编译器”。你的唯一任务：把用户的自然语言，翻译成【前端可直接执行】的单个 JSON 对象。
+你只能输出【纯 JSON】（只输出一个 JSON 对象），不要输出任何解释、Markdown、代码围栏、额外文字。
+顶层结构固定为：{"action":"<string>","params":{...}}
+（此处放你完整的白名单协议与示例）
+`.trim();
+
+// ========== Helpers ==========
+function jsonStringFallback(reason) {
+  // 给 command 模式兜底：保证前端 JSON.parse(data.result) 不崩
+  return JSON.stringify({ action: "noop", params: { reason } });
+}
 
 export default async function handler(req, res) {
-  // 1. 获取前端发来的用户指令
-  const { message } = req.body;
+  res.setHeader("Cache-Control", "no-store");
 
-  // 2. 调用通义千问 API (以阿里云 DashScope 为例)
-  // 你需要去阿里云申请一个 API KEY
-  const apiKey = process.env.DASHSCOPE_API_KEY; 
-
-  const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: 'qwen-turbo', // 使用通义千问 Turbo 模型
-      input: {
-        messages: [
-          {
-            role: "system",
-            content: "你是一个 PDB 可视化助手。请把用户指令转换为 JSON。只输出 JSON。..." // 把上面的 Prompt 放这里
-          },
-          {
-            role: "user",
-            content: message
-          }
-        ]
-      }
-    })
-  });
-
-  const data = await response.json();
-  
-  // 3. 把 AI 生成的 JSON 发回给前端
-  // 假设通义千问返回的结构在 output.text 里
-  res.status(200).json({ result: data.output.text });
-}
-```
-
-#### 第三步：修改前端 `App.jsx` 去调用这个 API
-
-在 `App.jsx` 的 `handleAiSubmit` 函数里，把现在的模拟逻辑替换成真实的请求：
-
-```javascript
-// 在 src/App.jsx 中
-
-const handleAiSubmit = async (e) => {
-  e.preventDefault();
-  // ...省略 UI 更新代码...
-
-  // 真实请求后端
-  try {
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: aiInput }) // 发送用户说的话
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
+    return res.status(405).json({
+      mode: "command",
+      raw: "",
+      result: jsonStringFallback("Method Not Allowed"),
+      error: "Method Not Allowed",
     });
-    
-    const data = await res.json();
-    const command = JSON.parse(data.result); // 解析 AI 返回的 JSON
-
-    // 执行指令
-    if (command.action === 'color') {
-       setCustomColor(command.params);
-    } else if (command.action === 'spin') {
-       toggleSpin();
-    }
-    // ... 更多逻辑
-    
-  } catch (err) {
-    console.error("AI 没听懂:", err);
   }
-};
+
+  try {
+    const { message, mode } = req.body || {};
+    const userText = typeof message === "string" ? message.trim() : "";
+
+    if (!userText) {
+      return res.status(400).json({
+        mode: mode || "command",
+        raw: "",
+        result: jsonStringFallback("Invalid request: message must be a non-empty string"),
+        error: "Invalid request",
+      });
+    }
+
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      return res.status(200).json({
+        mode: mode || "command",
+        raw: "",
+        result: jsonStringFallback("Server misconfigured: missing DEEPSEEK_API_KEY"),
+        error: "Server misconfigured: missing DEEPSEEK_API_KEY",
+      });
+    }
+
+    const resolvedMode = mode === "answer" ? "answer" : "command";
+    const systemPrompt =
+      resolvedMode === "answer" ? SYSTEM_PROMPT_ANSWER : SYSTEM_PROMPT_COMMAND;
+
+    const response = await fetch(DEEPSEEK_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userText },
+        ],
+        stream: false,
+        temperature: resolvedMode === "answer" ? 0.7 : 0,
+        top_p: 1,
+        max_tokens: 1200,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      return res.status(200).json({
+        mode: resolvedMode,
+        raw: "",
+        result: jsonStringFallback(`DeepSeek API failed: HTTP ${response.status}`),
+        details: errText.slice(0, 1200),
+        error: `DeepSeek API failed: HTTP ${response.status}`,
+      });
+    }
+
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content ?? "";
+
+    // answer：raw 直接给自然语言；result 也给同样内容，方便前端统一处理
+    if (resolvedMode === "answer") {
+      return res.status(200).json({
+        mode: "answer",
+        raw: content,
+        result: content,
+        model: MODEL,
+      });
+    }
+
+    // command：要求 content 本身就是 JSON 字符串
+    return res.status(200).json({
+      mode: "command",
+      raw: content,     // 可选：方便调试
+      result: content,  // 前端 JSON.parse(data.result)
+      model: MODEL,
+    });
+  } catch (err) {
+    return res.status(200).json({
+      mode: "command",
+      raw: "",
+      result: jsonStringFallback(`Internal Server Error: ${String(err?.message || err)}`),
+      error: String(err?.message || err),
+    });
+  }
+}
