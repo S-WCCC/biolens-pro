@@ -116,6 +116,10 @@ const BioLensApp = () => {
     setTimeout(() => setToast(null), 3000);
   };
 
+  const pushSystemLog = useCallback((text) => {
+    setMessages((prev) => [...prev, { role: 'system', content: `[UI] ${text}` }]);
+  }, []);
+
   const getPlugin = useCallback(() => viewerRef.current?.plugin, []);
 
   const getCurrentStructureWrapper = useCallback((plugin) => {
@@ -587,7 +591,6 @@ const BioLensApp = () => {
     const t = target?.type;
     const chain = target?.chain ? String(target.chain).toUpperCase() : null;
 
-    // simple resets
     if (t === 'all' || t === 'protein' || t === 'polymer') {
       plugin?.managers?.camera?.reset?.();
       return { ok: true };
@@ -742,7 +745,6 @@ const BioLensApp = () => {
           setActiveColorMode('chain');
           setCustomColor('#4f46e5');
           setActivePreset('custom');
-          // 可选：清理高亮图层（保留 pocket/hbond 可视化）
           setAgentOverlays((prev) => prev.filter(o => o.type === 'global-hbond' || o.type === 'ligand-surround'));
           return { ok: true, reply: '已恢复默认配色（按链）。' };
         }
@@ -829,7 +831,6 @@ const BioLensApp = () => {
             return { ok: true, reply: `已设置水透明度为 ${opacity.toFixed(2)}。` };
           }
 
-          // 对局部目标：用 overlay alpha 降级
           if (['selection', 'chain', 'residue', 'range'].includes(target.type)) {
             const ov = buildOverlayFromTarget(target, '#ffff00', { alpha: opacity, style: 'ball-and-stick', label: 'AI:Opacity' });
             if (!ov) return { ok: false, reply: 'set_opacity target 信息不足。' };
@@ -873,7 +874,6 @@ const BioLensApp = () => {
         }
 
         case 'label': {
-          // Mol* label API 各版本不稳定：降级为高亮
           const target = params?.target;
           const enabled = !!params?.enabled;
           if (!enabled) {
@@ -917,7 +917,6 @@ const BioLensApp = () => {
     try {
       const data = await callChatApi(userText, mode);
 
-      // surface server errors in UI
       if (data?.error) {
         const msg = `服务端错误：${String(data.error)}`;
         setMessages((prev) => [...prev, { role: 'system', content: msg }]);
@@ -933,7 +932,6 @@ const BioLensApp = () => {
         return;
       }
 
-      // command mode
       const resultStr = String(data?.result ?? '').trim();
       let cmd = null;
       try {
@@ -945,7 +943,6 @@ const BioLensApp = () => {
       const r = await executeCommand(cmd);
       const reply = r.reply || '已处理指令。';
 
-      // show execution receipt + json (debug)
       setMessages((prev) => [
         ...prev,
         { role: 'system', content: reply },
@@ -994,6 +991,52 @@ const BioLensApp = () => {
   const isGlobalHbondActive = agentOverlays.some((o) => o.type === 'global-hbond');
 
   // ---------------------------------------------------------------------------
+  // FIX: Smart Target buttons should NOT call runAssistant (LLM).
+  // They should run local UI actions only, and optionally log as system messages.
+  // ---------------------------------------------------------------------------
+  const handleFocusLigandUI = async () => {
+    const plugin = getPlugin();
+    if (!plugin) {
+      const msg = 'Mol* 未初始化。';
+      showToastMsg(msg);
+      pushSystemLog(msg);
+      return;
+    }
+
+    // Ensure ligand visibility before focusing
+    setShowLigands(true);
+
+    const r = await focusTarget(plugin, { type: 'ligand' });
+    const msg = r.ok ? '已聚焦配体。' : `聚焦失败：${r.reason || '未知原因'}`;
+    showToastMsg(msg);
+    pushSystemLog(msg);
+  };
+
+  const handleTogglePocketUI = () => {
+    const willEnable = !isLigandPocketActive;
+    setAgentOverlays((prev) => {
+      if (willEnable) return [...prev, { id: mkId(), type: 'ligand-surround', color: '#ff9900', label: 'UI:Pocket' }];
+      return prev.filter((o) => o.type !== 'ligand-surround');
+    });
+
+    const msg = willEnable ? '已显示配体结合口袋。' : '已关闭配体结合口袋。';
+    showToastMsg(msg);
+    pushSystemLog(msg);
+  };
+
+  const handleToggleGlobalHbondUI = () => {
+    const willEnable = !isGlobalHbondActive;
+    setAgentOverlays((prev) => {
+      if (willEnable) return [...prev, { id: mkId(), type: 'global-hbond', label: 'UI:GlobalHBonds' }];
+      return prev.filter((o) => o.type !== 'global-hbond');
+    });
+
+    const msg = willEnable ? '已显示全局氢键网络。' : '已关闭全局氢键网络。';
+    showToastMsg(msg);
+    pushSystemLog(msg);
+  };
+
+  // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
   return (
@@ -1022,7 +1065,7 @@ const BioLensApp = () => {
               onKeyDown={(e) => e.key === 'Enter' && handleFetchPdb(pdbId)}
             />
           </div>
-          <button onClick={() => handleFetchPdb(pdbId)} className="btn-secondary">Load</button>
+          <button type="button" onClick={() => handleFetchPdb(pdbId)} className="btn-secondary">Load</button>
           <label className="btn-primary cursor-pointer flex items-center gap-2">
             <Upload size={14} /> Open
             <input type="file" className="hidden" onChange={handleFileUpload} />
@@ -1041,7 +1084,7 @@ const BioLensApp = () => {
             <div className="absolute top-10 left-1/2 -translate-x-1/2 z-50 bg-red-100 text-red-700 px-4 py-2 rounded flex gap-2">
               <AlertCircle size={18} />
               {error}
-              <button onClick={() => setError(null)}>x</button>
+              <button type="button" onClick={() => setError(null)}>x</button>
             </div>
           )}
           <div ref={containerRef} className="absolute inset-0 w-full h-full" />
@@ -1049,6 +1092,7 @@ const BioLensApp = () => {
             <div className="bg-white/90 backdrop-blur px-3 py-1.5 rounded shadow text-xs font-bold text-slate-600 border">ID: {fileName}</div>
             {agentOverlays.length > 0 && (
               <button
+                type="button"
                 onClick={() => setAgentOverlays([])}
                 className="bg-red-500/90 text-white px-3 py-1.5 rounded shadow text-xs font-bold hover:bg-red-600 flex items-center gap-1 transition-all"
               >
@@ -1064,10 +1108,12 @@ const BioLensApp = () => {
             <section>
               <SectionHeader icon={<Target size={14} className="text-pink-500" />} title="Smart Targets (靶点)" />
               <div className="grid grid-cols-1 gap-2 mt-2">
+                {/* FIXED: no runAssistant here */}
                 <button
-                  onClick={() => runAssistant('聚焦配体', 'command', true)}
+                  type="button"
+                  onClick={handleFocusLigandUI}
                   className="flex items-center gap-2 p-2.5 rounded-lg border bg-white hover:bg-pink-50 transition-colors text-left group active:scale-95 disabled:opacity-60"
-                  disabled={agentBusy}
+                  disabled={loading}
                 >
                   <div className="p-1.5 bg-pink-100 text-pink-600 rounded-md group-hover:scale-110 transition-transform"><ScanSearch size={16} /></div>
                   <div className="flex flex-col">
@@ -1077,27 +1123,24 @@ const BioLensApp = () => {
                 </button>
 
                 <div className="grid grid-cols-2 gap-2">
+                  {/* FIXED: local overlay toggle only */}
                   <button
-                    onClick={() => {
-                      // 你原有 pocket overlay 逻辑也保留：展示 + LLM 执行可并存
-                      setAgentOverlays((prev) => [...prev, { id: mkId(), type: 'ligand-surround', color: '#ff9900' }]);
-                      runAssistant('显示配体口袋', 'command', true);
-                    }}
+                    type="button"
+                    onClick={handleTogglePocketUI}
                     className={`relative flex flex-col items-center justify-center p-2 rounded-lg border transition-all gap-1 disabled:opacity-60 ${isLigandPocketActive ? 'bg-amber-100 border-amber-300 text-amber-800 shadow-inner scale-95' : 'bg-white hover:bg-amber-50 text-slate-600'}`}
-                    disabled={agentBusy}
+                    disabled={loading}
                   >
                     <Microscope size={16} className={isLigandPocketActive ? 'text-amber-700' : 'text-amber-500'} />
                     <span className="text-[10px] font-medium">Binding Pocket</span>
                     {isLigandPocketActive && <div className="absolute top-1 right-1 w-2 h-2 bg-green-500 rounded-full animate-pulse" />}
                   </button>
 
+                  {/* FIXED: local overlay toggle only */}
                   <button
-                    onClick={() => {
-                      setAgentOverlays((prev) => [...prev, { id: mkId(), type: 'global-hbond' }]);
-                      runAssistant('显示全局氢键', 'command', true);
-                    }}
+                    type="button"
+                    onClick={handleToggleGlobalHbondUI}
                     className={`relative flex flex-col items-center justify-center p-2 rounded-lg border transition-all gap-1 disabled:opacity-60 ${isGlobalHbondActive ? 'bg-indigo-100 border-indigo-300 text-indigo-800 shadow-inner scale-95' : 'bg-white hover:bg-indigo-50 text-slate-600'}`}
-                    disabled={agentBusy}
+                    disabled={loading}
                   >
                     <Link2 size={16} className={isGlobalHbondActive ? 'text-indigo-700' : 'text-indigo-500'} />
                     <span className="text-[10px] font-medium">Global H-Bonds</span>
@@ -1110,13 +1153,13 @@ const BioLensApp = () => {
             <section>
               <SectionHeader icon={<MousePointer2 size={14} className="text-indigo-500" />} title="Click Action (点击交互)" />
               <div className="grid grid-cols-3 gap-2 mt-2">
-                <button onClick={() => setClickMode('pick')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'pick' ? 'bg-indigo-600 text-white shadow-md transform scale-105' : 'bg-white hover:bg-slate-50'}`}>
+                <button type="button" onClick={() => setClickMode('pick')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'pick' ? 'bg-indigo-600 text-white shadow-md transform scale-105' : 'bg-white hover:bg-slate-50'}`}>
                   <MousePointer2 size={14} /> Focus
                 </button>
-                <button onClick={() => setClickMode('zone5')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'zone5' ? 'bg-red-600 text-white shadow-md transform scale-105' : 'bg-white hover:bg-red-50'}`}>
+                <button type="button" onClick={() => setClickMode('zone5')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'zone5' ? 'bg-red-600 text-white shadow-md transform scale-105' : 'bg-white hover:bg-red-50'}`}>
                   <CircleDashed size={14} /> Zone 5Å
                 </button>
-                <button onClick={() => setClickMode('hbond')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'hbond' ? 'bg-amber-500 text-white shadow-md transform scale-105' : 'bg-white hover:bg-amber-50'}`}>
+                <button type="button" onClick={() => setClickMode('hbond')} className={`text-[10px] p-2 rounded border flex flex-col items-center gap-1 transition-all ${clickMode === 'hbond' ? 'bg-amber-500 text-white shadow-md transform scale-105' : 'bg-white hover:bg-amber-50'}`}>
                   <Link2 size={14} /> H-Bond
                 </button>
               </div>
@@ -1133,6 +1176,7 @@ const BioLensApp = () => {
                 {Object.entries(JOURNAL_PRESETS).map(([key, cfg]) => (
                   <button
                     key={key}
+                    type="button"
                     onClick={() => applyPreset(key)}
                     className={`text-xs py-2.5 px-3 rounded-xl border font-bold text-left flex items-center justify-between group ${activePreset === key ? 'bg-slate-800 text-white border-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}
                   >
@@ -1149,6 +1193,7 @@ const BioLensApp = () => {
                 {Object.entries(STYLES).map(([key, cfg]) => (
                   <button
                     key={key}
+                    type="button"
                     onClick={() => { setActiveStyle(key); setActivePreset('custom'); }}
                     className={`text-xs py-1.5 px-2 rounded border transition-colors ${activeStyle === key ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-slate-50'}`}
                   >
@@ -1161,6 +1206,7 @@ const BioLensApp = () => {
                 {Object.entries(COLORS).map(([key, cfg]) => (
                   <button
                     key={key}
+                    type="button"
                     onClick={() => { setActiveColorMode(key); setActivePreset('custom'); }}
                     className={`text-[10px] px-2 py-1 rounded border ${activeColorMode === key ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}
                   >
@@ -1191,15 +1237,17 @@ const BioLensApp = () => {
             </section>
           </div>
 
-          {/* Chat Panel */}
-          <div className="h-64 border-t bg-slate-50 flex flex-col">
+          {/* Chat Panel (resizable) */}
+          <div
+            className="border-t bg-slate-50 flex flex-col resize-y overflow-hidden"
+            style={{ height: 320, minHeight: 220, maxHeight: 640 }}
+          >
             <div className="px-3 py-2 border-b bg-white flex items-center gap-2 text-indigo-600 shadow-sm">
               <MessageSquare size={14} />
               <span className="text-xs font-bold uppercase tracking-wider">Bio-Agent</span>
 
               {agentBusy && <span className="text-[10px] text-slate-400">（处理中…）</span>}
 
-              {/* Mode Switch */}
               <div className="ml-auto flex items-center bg-slate-100 rounded-lg p-1 border border-slate-200">
                 <button
                   type="button"
