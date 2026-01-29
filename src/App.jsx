@@ -352,6 +352,7 @@ const BioLensApp = () => {
         if (!MS) return;
 
         for (const overlay of agentOverlays) {
+          console.log('Processing overlay:', overlay); // Debug log
           let expression = null;
           const chainTest = overlay.targetChain
             ? MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), overlay.targetChain])
@@ -371,10 +372,10 @@ const BioLensApp = () => {
               { label: 'Global H-Bonds' }
             );
 
-            
+
             console.log('overlay create', overlay, selComp?.ref, selComp?.cell?.transform?.ref);
             console.log('overlay hasSel', hasSel(selComp));
-if (selComp && hasSel(selComp)) {
+            if (selComp && hasSel(selComp)) {
               await plugin.builders.structure.representation.addRepresentation(selComp, {
                 type: 'interactions',
                 typeParams: { includeCovalent: false, interactionTypes: ['hydrogen-bond', 'weak-hydrogen-bond', 'ionic', 'pi-pi'], sizeFactor: 0.2 }
@@ -442,10 +443,10 @@ if (selComp && hasSel(selComp)) {
             { label: overlay.label || 'Overlay' }
           );
 
-          
+
           console.log('overlay create', overlay, selComp?.ref, selComp?.cell?.transform?.ref);
           console.log('overlay hasSel', hasSel(selComp));
-if (!selComp || !hasSel(selComp)) continue;
+          if (!selComp || !hasSel(selComp)) continue;
 
           if (overlay.interaction) {
             await plugin.builders.structure.representation.addRepresentation(selComp, {
@@ -569,26 +570,32 @@ if (!selComp || !hasSel(selComp)) continue;
   // Command execution helpers
   // ---------------------------------------------------------------------------
   const buildOverlayFromTarget = (target, color, extra = {}) => {
+    console.log('buildOverlayFromTarget called with:', target, color, extra); // Debug log
     const t = target?.type;
     const chain = target?.chain ? String(target.chain).toUpperCase() : null;
     const id = mkId();
 
     if (t === 'chain' && chain) {
+      console.log('Creating chain overlay:', chain); // Debug log
       return { id, type: 'chain', target: chain, color, ...extra };
     }
     if (t === 'residue' && Number.isInteger(target?.resId)) {
       const resId = Number(target.resId);
+      console.log('Creating residue overlay:', resId, chain); // Debug log
       return { id, type: 'residue', target: `${resId}-${resId}`, targetChain: chain, color, ...extra };
     }
     if (t === 'range' && Number.isInteger(target?.startResId) && Number.isInteger(target?.endResId)) {
       const a = Number(target.startResId);
       const b = Number(target.endResId);
+      console.log('Creating range overlay:', a, b, chain); // Debug log
       return { id, type: 'residue', target: `${a}-${b}`, targetChain: chain, color, ...extra };
     }
     if (t === 'ligand') {
       const resName = String(target?.resName || '').trim().toUpperCase();
+      console.log('Creating ligand overlay:', resName); // Debug log
       return { id, type: 'ligand', resName, color, ...extra };
     }
+    console.warn('buildOverlayFromTarget failed: unsupported target type or missing data', target); // Debug log
     return null;
   };
 
