@@ -8,12 +8,9 @@ import {
 } from 'lucide-react';
 
 /**
- * BioLens Agent Pro - DeepSeek Edition
- * - Frontend no longer regex-parses commands
- * - Calls /api/chat (server-side DeepSeek)
- * - Supports two modes:
- *   1) answer: show raw natural-language answer
- *   2) command: parse result JSON and execute Mol* actions
+ * BioLens Agent Pro - DeepSeek Edition (Fixed)
+ * - Improved JSON parsing logic for residue IDs
+ * - Enhanced Mol* visualization sync with debug logs
  */
 
 // -----------------------------------------------------------------------------
@@ -88,7 +85,7 @@ const BioLensApp = () => {
   const [showWater, setShowWater] = useState(false);
   const [showLigands, setShowLigands] = useState(true);
 
-  // Opacity (support set_opacity command)
+  // Opacity
   const [polymerOpacity, setPolymerOpacity] = useState(1.0);
   const [ligandOpacity, setLigandOpacity] = useState(1.0);
   const [waterOpacity, setWaterOpacity] = useState(0.4);
@@ -99,13 +96,11 @@ const BioLensApp = () => {
 
   // Chat
   const [messages, setMessages] = useState([
-    { role: 'system', content: 'Agent Ready. 选择“操作/问答”，然后输入：例如 “把A链100号残基变红 / 聚焦配体 / 解释一下血红蛋白结构”。' }
+    { role: 'system', content: 'Agent Ready. 选择“操作/问答”，然后输入：例如 “把A链100号残基变红”。' }
   ]);
   const [inputMsg, setInputMsg] = useState('');
   const [agentBusy, setAgentBusy] = useState(false);
-
-  // Mode: answer vs command
-  const [chatMode, setChatMode] = useState('command'); // 'answer' | 'command'
+  const [chatMode, setChatMode] = useState('command');
 
   // Spin
   const [spinState, setSpinState] = useState({ enabled: false, speed: 1.0 });
@@ -204,21 +199,20 @@ const BioLensApp = () => {
 
             let newOverlay = null;
             let feedbackMsg = '';
-
             const id = mkId();
 
             if (clickMode === 'zone5') {
               newOverlay = { id, type: 'zone', target: `${seqId}`, targetChain: chainId, radius: 5, color: '#ff0055', rawSeqId: seqId };
-              feedbackMsg = `Zone 5Å: 残基 ${resName} ${seqId} (链${chainId})`;
+              feedbackMsg = `Zone 5Å: Residue ${resName} ${seqId} (Chain ${chainId})`;
             } else if (clickMode === 'hbond') {
               newOverlay = { id, type: 'residue', target: `${seqId}-${seqId}`, targetChain: chainId, interaction: true, color: '#ffff00', style: 'ball-and-stick' };
-              feedbackMsg = `H-Bonds: 残基 ${resName} ${seqId} (链${chainId})`;
+              feedbackMsg = `H-Bonds: Residue ${resName} ${seqId} (Chain ${chainId})`;
             }
 
             if (newOverlay) {
               setAgentOverlays((prev) => [...prev, newOverlay]);
               showToastMsg(feedbackMsg);
-              setMessages((prev) => [...prev, { role: 'system', content: `[点击] ${feedbackMsg}` }]);
+              setMessages((prev) => [...prev, { role: 'system', content: `[Click] ${feedbackMsg}` }]);
             }
           }
         } catch (err) {
@@ -247,18 +241,13 @@ const BioLensApp = () => {
     const step = (t) => {
       const dt = Math.max(0, t - last);
       last = t;
-
       const delta = (dt / 16.6667) * 0.01 * (Number(spinState.speed) || 1);
-
       try {
         if (camera?.rotate) {
           camera.rotate(delta, 0);
           requestDraw && requestDraw();
         }
-      } catch {
-        // ignore
-      }
-
+      } catch {}
       raf = requestAnimationFrame(step);
     };
 
@@ -267,16 +256,30 @@ const BioLensApp = () => {
   }, [spinState.enabled, spinState.speed, loading, getPlugin]);
 
   // ---------------------------------------------------------------------------
-  // Core: Visual Sync
+  // Core: Visual Sync (FIXED)
   // ---------------------------------------------------------------------------
   const syncVisuals = useCallback(async () => {
     const plugin = getPlugin();
-    if (!plugin) return;
-    if (!plugin.managers.structure.hierarchy.current.structures.length) return;
+    if (!plugin) {
+      console.warn('[Sync] Plugin not found');
+      return;
+    }
+    
+    // Check if hierarchy exists
+    if (!plugin.managers?.structure?.hierarchy?.current?.structures) {
+        return;
+    }
+    
+    const hierarchy = plugin.managers.structure.hierarchy.current;
+    if (!hierarchy.structures.length) {
+      // No structure loaded yet, silent return
+      return;
+    }
+
+    console.log('[Sync] Starting visual sync with overlays:', agentOverlays);
 
     try {
       await plugin.dataTransaction(async () => {
-        const hierarchy = plugin.managers.structure.hierarchy.current;
         const structure = hierarchy.structures[0];
         const state = plugin.state.data;
         const hasSel = (sel) => {
@@ -284,7 +287,7 @@ const BioLensApp = () => {
           return !!ref && state.cells.has(ref);
         };
 
-        if (!structure || !structure.cell || !state.cells.has(structure.cell.transform.ref)) return;
+        if (!structure || !structure.cell) return;
 
         // 1) Environment
         const canvas = plugin.canvas3d;
@@ -347,13 +350,18 @@ const BioLensApp = () => {
           }
         }
 
-        // 5) AGENT OVERLAYS
+        // 5) AGENT OVERLAYS (Visual Logic)
         const MS = window.molstar?.MolScriptBuilder;
-        if (!MS) return;
+        if (!MS) {
+            console.error('[Sync] MolScriptBuilder missing');
+            return;
+        }
 
         for (const overlay of agentOverlays) {
-          console.log('Processing overlay:', overlay); // Debug log
+          console.log('[Sync] Processing overlay:', overlay);
           let expression = null;
+          
+          // Helper: Chain test (insensitive or trim?) - kept simple
           const chainTest = overlay.targetChain
             ? MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), overlay.targetChain])
             : null;
@@ -363,18 +371,9 @@ const BioLensApp = () => {
             const allPolymers = MS.struct.generator.atomGroups({
               'entity-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'polymer'])
             });
-
-            const key = overlay.id || 'ov-global-hbond';
             const selComp = await plugin.builders.structure.tryCreateComponentFromExpression(
-              structure.cell,
-              allPolymers,
-              key,
-              { label: 'Global H-Bonds' }
+              structure.cell, allPolymers, overlay.id, { label: 'Global H-Bonds' }
             );
-
-
-            console.log('overlay create', overlay, selComp?.ref, selComp?.cell?.transform?.ref);
-            console.log('overlay hasSel', hasSel(selComp));
             if (selComp && hasSel(selComp)) {
               await plugin.builders.structure.representation.addRepresentation(selComp, {
                 type: 'interactions',
@@ -388,20 +387,27 @@ const BioLensApp = () => {
             expression = MS.struct.generator.atomGroups({
               'chain-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), overlay.target])
             });
-          } else if (overlay.type === 'residue') {
-            const [start, end] = String(overlay.target).split('-').map(Number);
-            const endRes = Number.isFinite(end) ? end : start;
-            const resTest = MS.core.logic.and([
-              MS.core.rel.gr([MS.struct.atomProperty.macromolecular.auth_seq_id(), start - 1]),
-              MS.core.rel.lt([MS.struct.atomProperty.macromolecular.auth_seq_id(), endRes + 1])
-            ]);
-            expression = MS.struct.generator.atomGroups({
-              'residue-test': resTest,
-              ...(chainTest ? { 'chain-test': chainTest } : {})
-            });
-          } else if (overlay.type === 'zone') {
+          } 
+          else if (overlay.type === 'residue') {
+            // "start-end" or "val"
+            const parts = String(overlay.target).split('-');
+            const start = Number(parts[0]);
+            const end = parts.length > 1 ? Number(parts[1]) : start;
+            
+            if (!isNaN(start)) {
+                const resTest = MS.core.logic.and([
+                  MS.core.rel.gr([MS.struct.atomProperty.macromolecular.auth_seq_id(), start - 1]),
+                  MS.core.rel.lt([MS.struct.atomProperty.macromolecular.auth_seq_id(), end + 1])
+                ]);
+                expression = MS.struct.generator.atomGroups({
+                  'residue-test': resTest,
+                  ...(chainTest ? { 'chain-test': chainTest } : {})
+                });
+            }
+          } 
+          else if (overlay.type === 'zone') {
             const centerExp = MS.struct.generator.atomGroups({
-              'residue-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), overlay.rawSeqId]),
+              'residue-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), Number(overlay.rawSeqId)]),
               ...(chainTest ? { 'chain-test': chainTest } : {})
             });
             expression = MS.struct.modifier.includeSurroundings({
@@ -409,7 +415,8 @@ const BioLensApp = () => {
               radius: overlay.radius || 5,
               'as-whole-residues': true
             });
-          } else if (overlay.type === 'ligand-surround') {
+          } 
+          else if (overlay.type === 'ligand-surround') {
             const ligExp = MS.struct.generator.atomGroups({
               'entity-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'non-polymer'])
             });
@@ -418,45 +425,43 @@ const BioLensApp = () => {
               radius: 5,
               'as-whole-residues': true
             });
-          } else if (overlay.type === 'ligand') {
-            const entityTest = MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'non-polymer']);
-            const resName = String(overlay.resName || '').trim().toUpperCase();
-            const compIdFn = MS.struct.atomProperty?.macromolecular?.label_comp_id;
-
-            if (resName && typeof compIdFn === 'function') {
-              expression = MS.struct.generator.atomGroups({
-                'entity-test': entityTest,
-                'resname-test': MS.core.rel.eq([compIdFn(), resName])
-              });
-            } else {
-              expression = MS.struct.generator.atomGroups({ 'entity-test': entityTest });
-            }
+          } 
+          else if (overlay.type === 'ligand') {
+             const entityTest = MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'non-polymer']);
+             const resName = String(overlay.resName || '').trim().toUpperCase();
+             const compIdFn = MS.struct.atomProperty?.macromolecular?.label_comp_id;
+             if (resName && typeof compIdFn === 'function') {
+               expression = MS.struct.generator.atomGroups({
+                 'entity-test': entityTest,
+                 'resname-test': MS.core.rel.eq([compIdFn(), resName])
+               });
+             } else {
+               expression = MS.struct.generator.atomGroups({ 'entity-test': entityTest });
+             }
           }
 
           if (!expression) continue;
 
-          const key = overlay.id || 'ov-selection';
+          // Create Selection Component
           const selComp = await plugin.builders.structure.tryCreateComponentFromExpression(
             structure.cell,
             expression,
-            key,
+            overlay.id,
             { label: overlay.label || 'Overlay' }
           );
 
+          if (!selComp || !hasSel(selComp)) {
+              console.warn('[Sync] Empty selection created for:', overlay);
+              continue;
+          }
 
-          console.log('overlay create', overlay, selComp?.ref, selComp?.cell?.transform?.ref);
-          console.log('overlay hasSel', hasSel(selComp));
-          if (!selComp || !hasSel(selComp)) continue;
-
+          // Add Representation
           if (overlay.interaction) {
             await plugin.builders.structure.representation.addRepresentation(selComp, {
-              type: 'interactions',
-              typeParams: { includeCovalent: false }
+              type: 'interactions', typeParams: { includeCovalent: false }
             });
             await plugin.builders.structure.representation.addRepresentation(selComp, {
-              type: 'ball-and-stick',
-              color: 'element-symbol',
-              typeParams: { sizeFactor: 0.15 }
+              type: 'ball-and-stick', color: 'element-symbol', typeParams: { sizeFactor: 0.15 }
             });
           } else {
             const colorVal = hexToInt(overlay.color || '#ff0000');
@@ -468,7 +473,7 @@ const BioLensApp = () => {
               type: ovStyle,
               color: 'uniform',
               colorParams: { value: colorVal },
-              typeParams: { sizeFactor: 0.25, alpha: clamp01(overlay.alpha ?? 1.0) }
+              typeParams: { sizeFactor: 0.35, alpha: clamp01(overlay.alpha ?? 1.0) }
             });
           }
         }
@@ -553,49 +558,52 @@ const BioLensApp = () => {
   };
 
   // ---------------------------------------------------------------------------
-  // DeepSeek API (via your server /api/chat)
+  // DeepSeek API
   // ---------------------------------------------------------------------------
   const callChatApi = async (message, mode) => {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, mode }) // mode: 'answer' | 'command'
+      body: JSON.stringify({ message, mode })
     });
-
     const data = await resp.json().catch(() => ({}));
     return data;
   };
 
   // ---------------------------------------------------------------------------
-  // Command execution helpers
+  // Command execution helpers (FIXED)
   // ---------------------------------------------------------------------------
   const buildOverlayFromTarget = (target, color, extra = {}) => {
-    console.log('buildOverlayFromTarget called with:', target, color, extra); // Debug log
+    // Debug Log
+    console.log('[Command] buildOverlayFromTarget input:', { target, color });
+
     const t = target?.type;
-    const chain = target?.chain ? String(target.chain).toUpperCase() : null;
+    const chain = target?.chain ? String(target.chain).trim() : null;
     const id = mkId();
 
     if (t === 'chain' && chain) {
-      console.log('Creating chain overlay:', chain); // Debug log
       return { id, type: 'chain', target: chain, color, ...extra };
     }
-    if (t === 'residue' && Number.isInteger(target?.resId)) {
+    
+    // FIX: Use !isNaN instead of Number.isInteger for robustness
+    if (t === 'residue' && target?.resId !== undefined && !isNaN(Number(target.resId))) {
       const resId = Number(target.resId);
-      console.log('Creating residue overlay:', resId, chain); // Debug log
+      // Ensure target is string "start-end"
       return { id, type: 'residue', target: `${resId}-${resId}`, targetChain: chain, color, ...extra };
     }
-    if (t === 'range' && Number.isInteger(target?.startResId) && Number.isInteger(target?.endResId)) {
+    
+    if (t === 'range' && !isNaN(Number(target?.startResId)) && !isNaN(Number(target?.endResId))) {
       const a = Number(target.startResId);
       const b = Number(target.endResId);
-      console.log('Creating range overlay:', a, b, chain); // Debug log
       return { id, type: 'residue', target: `${a}-${b}`, targetChain: chain, color, ...extra };
     }
+    
     if (t === 'ligand') {
       const resName = String(target?.resName || '').trim().toUpperCase();
-      console.log('Creating ligand overlay:', resName); // Debug log
       return { id, type: 'ligand', resName, color, ...extra };
     }
-    console.warn('buildOverlayFromTarget failed: unsupported target type or missing data', target); // Debug log
+    
+    console.warn('[Command] buildOverlay failed for target:', target);
     return null;
   };
 
@@ -620,12 +628,12 @@ const BioLensApp = () => {
       exp = MS.struct.generator.atomGroups({
         'chain-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), chain])
       });
-    } else if (t === 'residue' && Number.isInteger(target?.resId)) {
+    } else if (t === 'residue' && !isNaN(Number(target?.resId))) {
       exp = MS.struct.generator.atomGroups({
         'residue-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), Number(target.resId)]),
         ...(chain ? { 'chain-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), chain]) } : {})
       });
-    } else if (t === 'range' && Number.isInteger(target?.startResId) && Number.isInteger(target?.endResId)) {
+    } else if (t === 'range' && !isNaN(Number(target?.startResId)) && !isNaN(Number(target?.endResId))) {
       const a = Number(target.startResId);
       const b = Number(target.endResId);
       const resTest = MS.core.logic.and([
@@ -640,7 +648,6 @@ const BioLensApp = () => {
       const entityTest = MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'non-polymer']);
       const resName = String(target?.resName || '').trim().toUpperCase();
       const compIdFn = MS.struct.atomProperty?.macromolecular?.label_comp_id;
-
       if (resName && typeof compIdFn === 'function') {
         exp = MS.struct.generator.atomGroups({
           'entity-test': entityTest,
@@ -922,7 +929,7 @@ const BioLensApp = () => {
   };
 
   // ---------------------------------------------------------------------------
-  // Unified runner: call DeepSeek -> output depends on mode
+  // Unified runner
   // ---------------------------------------------------------------------------
   const runAssistant = async (userText, modeOverride = null, recordUserMsg = true) => {
     const mode = modeOverride || chatMode;
@@ -989,13 +996,12 @@ const BioLensApp = () => {
     await runAssistant(text, null, true);
   };
 
-  // Auto-scroll chat
   useEffect(() => {
     try { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); } catch { /* ignore */ }
   }, [messages]);
 
   // ---------------------------------------------------------------------------
-  // Preset
+  // Preset & Actions
   // ---------------------------------------------------------------------------
   const applyPreset = (key) => {
     const p = JOURNAL_PRESETS[key] || JOURNAL_PRESETS.default;
@@ -1004,50 +1010,10 @@ const BioLensApp = () => {
     setActiveColorMode(p.color);
     if (p.customColor) setCustomColor('#' + p.customColor.toString(16).padStart(6, '0'));
   };
-  const handleQuickAction = async (name) => {
-    try {
-      if (loading) return;
-
-      if (name === 'binding_pocket') {
-        // 5Å surroundings around all non-polymer entities
-        setAgentOverlays((prev) => [...prev, { id: mkId(), type: 'ligand-surround', color: '#ff9900', label: 'Quick:Pocket' }]);
-        const msg = '已显示配体结合口袋（5Å）。';
-        appendSystemMessage(msg);
-        showToastMsg(msg);
-        return;
-      }
-
-      if (name === 'global_hbond') {
-        setAgentOverlays((prev) => [...prev, { id: mkId(), type: 'global-hbond', label: 'Quick:GlobalHbond' }]);
-        const msg = '已显示全局氢键网络。';
-        appendSystemMessage(msg);
-        showToastMsg(msg);
-        return;
-      }
-
-      if (name === 'focus_ligand') {
-        setShowLigands(true);
-        const r = await executeCommand({ action: 'focus', params: { target: { type: 'ligand' } } });
-        const msg = r?.reply || '已聚焦配体。';
-        appendSystemMessage(msg);
-        showToastMsg(msg);
-        return;
-      }
-    } catch (e) {
-      console.error('handleQuickAction error:', e);
-      const msg = 'Quick action 执行失败。';
-      appendSystemMessage(msg);
-      showToastMsg(msg);
-    }
-  };
 
   const isLigandPocketActive = agentOverlays.some((o) => o.type === 'ligand-surround');
   const isGlobalHbondActive = agentOverlays.some((o) => o.type === 'global-hbond');
 
-  // ---------------------------------------------------------------------------
-  // FIX: Smart Target buttons should NOT call runAssistant (LLM).
-  // They should run local UI actions only, and optionally log as system messages.
-  // ---------------------------------------------------------------------------
   const handleFocusLigandUI = async () => {
     const plugin = getPlugin();
     if (!plugin) {
@@ -1056,10 +1022,7 @@ const BioLensApp = () => {
       pushSystemLog(msg);
       return;
     }
-
-    // Ensure ligand visibility before focusing
     setShowLigands(true);
-
     const r = await focusTarget(plugin, { type: 'ligand' });
     const msg = r.ok ? '已聚焦配体。' : `聚焦失败：${r.reason || '未知原因'}`;
     showToastMsg(msg);
@@ -1072,7 +1035,6 @@ const BioLensApp = () => {
       if (willEnable) return [...prev, { id: mkId(), type: 'ligand-surround', color: '#ff9900', label: 'UI:Pocket' }];
       return prev.filter((o) => o.type !== 'ligand-surround');
     });
-
     const msg = willEnable ? '已显示配体结合口袋。' : '已关闭配体结合口袋。';
     showToastMsg(msg);
     pushSystemLog(msg);
@@ -1084,7 +1046,6 @@ const BioLensApp = () => {
       if (willEnable) return [...prev, { id: mkId(), type: 'global-hbond', label: 'UI:GlobalHBonds' }];
       return prev.filter((o) => o.type !== 'global-hbond');
     });
-
     const msg = willEnable ? '已显示全局氢键网络。' : '已关闭全局氢键网络。';
     showToastMsg(msg);
     pushSystemLog(msg);
@@ -1162,7 +1123,6 @@ const BioLensApp = () => {
             <section>
               <SectionHeader icon={<Target size={14} className="text-pink-500" />} title="Smart Targets (靶点)" />
               <div className="grid grid-cols-1 gap-2 mt-2">
-                {/* FIXED: no runAssistant here */}
                 <button
                   type="button"
                   onClick={handleFocusLigandUI}
@@ -1177,7 +1137,6 @@ const BioLensApp = () => {
                 </button>
 
                 <div className="grid grid-cols-2 gap-2">
-                  {/* FIXED: local overlay toggle only */}
                   <button
                     type="button"
                     onClick={handleTogglePocketUI}
@@ -1189,7 +1148,6 @@ const BioLensApp = () => {
                     {isLigandPocketActive && <div className="absolute top-1 right-1 w-2 h-2 bg-green-500 rounded-full animate-pulse" />}
                   </button>
 
-                  {/* FIXED: local overlay toggle only */}
                   <button
                     type="button"
                     onClick={handleToggleGlobalHbondUI}
@@ -1299,9 +1257,7 @@ const BioLensApp = () => {
             <div className="px-3 py-2 border-b bg-white flex items-center gap-2 text-indigo-600 shadow-sm">
               <MessageSquare size={14} />
               <span className="text-xs font-bold uppercase tracking-wider">Bio-Agent</span>
-
               {agentBusy && <span className="text-[10px] text-slate-400">（处理中…）</span>}
-
               <div className="ml-auto flex items-center bg-slate-100 rounded-lg p-1 border border-slate-200">
                 <button
                   type="button"
