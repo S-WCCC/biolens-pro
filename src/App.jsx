@@ -279,6 +279,11 @@ const BioLensApp = () => {
         const hierarchy = plugin.managers.structure.hierarchy.current;
         const structure = hierarchy.structures[0];
         const state = plugin.state.data;
+        const hasSel = (sel) => {
+          const ref = sel?.cell?.transform?.ref ?? sel?.ref;
+          return !!ref && state.cells.has(ref);
+        };
+
         if (!structure || !structure.cell || !state.cells.has(structure.cell.transform.ref)) return;
 
         // 1) Environment
@@ -302,7 +307,7 @@ const BioLensApp = () => {
 
         // 3) Render polymer base
         const polymerComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'polymer');
-        if (polymerComp && state.cells.has(polymerComp.ref)) {
+        if (polymerComp && hasSel(polymerComp)) {
           let colorProps = { name: COLORS[activeColorMode]?.type || 'chain-id' };
           if (activeColorMode === 'uniform') colorProps = { name: 'uniform', params: { value: hexToInt(customColor) } };
           if (activePreset === 'hologram') colorProps = { name: 'uniform', params: { value: JOURNAL_PRESETS.hologram.customColor } };
@@ -321,7 +326,7 @@ const BioLensApp = () => {
         // 4) Ligands / Water
         if (showLigands) {
           const ligandComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'ligand');
-          if (ligandComp && state.cells.has(ligandComp.ref)) {
+          if (ligandComp && hasSel(ligandComp)) {
             await plugin.builders.structure.representation.addRepresentation(ligandComp, {
               type: 'ball-and-stick',
               color: 'element-symbol',
@@ -332,7 +337,7 @@ const BioLensApp = () => {
 
         if (showWater) {
           const waterComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'water');
-          if (waterComp && state.cells.has(waterComp.ref)) {
+          if (waterComp && hasSel(waterComp)) {
             await plugin.builders.structure.representation.addRepresentation(waterComp, {
               type: 'ball-and-stick',
               color: 'uniform',
@@ -366,7 +371,10 @@ const BioLensApp = () => {
               { label: 'Global H-Bonds' }
             );
 
-            if (selComp && state.cells.has(selComp.ref)) {
+            
+            console.log('overlay create', overlay, selComp?.ref, selComp?.cell?.transform?.ref);
+            console.log('overlay hasSel', hasSel(selComp));
+if (selComp && hasSel(selComp)) {
               await plugin.builders.structure.representation.addRepresentation(selComp, {
                 type: 'interactions',
                 typeParams: { includeCovalent: false, interactionTypes: ['hydrogen-bond', 'weak-hydrogen-bond', 'ionic', 'pi-pi'], sizeFactor: 0.2 }
@@ -388,12 +396,12 @@ const BioLensApp = () => {
             ]);
             expression = MS.struct.generator.atomGroups({
               'residue-test': resTest,
-              'chain-test': chainTest || true
+              ...(chainTest ? { 'chain-test': chainTest } : {})
             });
           } else if (overlay.type === 'zone') {
             const centerExp = MS.struct.generator.atomGroups({
               'residue-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_seq_id(), overlay.rawSeqId]),
-              'chain-test': chainTest || true
+              ...(chainTest ? { 'chain-test': chainTest } : {})
             });
             expression = MS.struct.modifier.includeSurroundings({
               0: centerExp,
@@ -434,7 +442,10 @@ const BioLensApp = () => {
             { label: overlay.label || 'Overlay' }
           );
 
-          if (!selComp || !state.cells.has(selComp.ref)) continue;
+          
+          console.log('overlay create', overlay, selComp?.ref, selComp?.cell?.transform?.ref);
+          console.log('overlay hasSel', hasSel(selComp));
+if (!selComp || !hasSel(selComp)) continue;
 
           if (overlay.interaction) {
             await plugin.builders.structure.representation.addRepresentation(selComp, {
@@ -986,6 +997,42 @@ const BioLensApp = () => {
     setActiveColorMode(p.color);
     if (p.customColor) setCustomColor('#' + p.customColor.toString(16).padStart(6, '0'));
   };
+  const handleQuickAction = async (name) => {
+    try {
+      if (loading) return;
+
+      if (name === 'binding_pocket') {
+        // 5Å surroundings around all non-polymer entities
+        setAgentOverlays((prev) => [...prev, { id: mkId(), type: 'ligand-surround', color: '#ff9900', label: 'Quick:Pocket' }]);
+        const msg = '已显示配体结合口袋（5Å）。';
+        appendSystemMessage(msg);
+        showToastMsg(msg);
+        return;
+      }
+
+      if (name === 'global_hbond') {
+        setAgentOverlays((prev) => [...prev, { id: mkId(), type: 'global-hbond', label: 'Quick:GlobalHbond' }]);
+        const msg = '已显示全局氢键网络。';
+        appendSystemMessage(msg);
+        showToastMsg(msg);
+        return;
+      }
+
+      if (name === 'focus_ligand') {
+        setShowLigands(true);
+        const r = await executeCommand({ action: 'focus', params: { target: { type: 'ligand' } } });
+        const msg = r?.reply || '已聚焦配体。';
+        appendSystemMessage(msg);
+        showToastMsg(msg);
+        return;
+      }
+    } catch (e) {
+      console.error('handleQuickAction error:', e);
+      const msg = 'Quick action 执行失败。';
+      appendSystemMessage(msg);
+      showToastMsg(msg);
+    }
+  };
 
   const isLigandPocketActive = agentOverlays.some((o) => o.type === 'ligand-surround');
   const isGlobalHbondActive = agentOverlays.some((o) => o.type === 'global-hbond');
@@ -1253,7 +1300,7 @@ const BioLensApp = () => {
                   type="button"
                   onClick={() => setChatMode('command')}
                   className={`px-2 py-1 text-[10px] font-bold rounded-md ${chatMode === 'command' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-white'}`}
-                  disabled={agentBusy}
+                  disabled={loading}
                 >
                   操作
                 </button>
@@ -1261,7 +1308,7 @@ const BioLensApp = () => {
                   type="button"
                   onClick={() => setChatMode('answer')}
                   className={`px-2 py-1 text-[10px] font-bold rounded-md ${chatMode === 'answer' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-white'}`}
-                  disabled={agentBusy}
+                  disabled={loading}
                 >
                   问答
                 </button>
@@ -1293,7 +1340,7 @@ const BioLensApp = () => {
                 placeholder={chatMode === 'answer' ? '提问…（返回 raw answer）' : '指令…（返回结构化 JSON 并执行）'}
                 value={inputMsg}
                 onChange={(e) => setInputMsg(e.target.value)}
-                disabled={agentBusy}
+                disabled={loading}
               />
               <button
                 type="submit"
