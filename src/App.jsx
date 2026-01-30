@@ -2,20 +2,20 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Upload, Search, AlertCircle, RefreshCw, MessageSquare, Send,
+  Upload, Search, AlertCircle, RefreshCw, MessageSquare, 
   Cpu, Layers, Sparkles, Wand2, Palette,
   MousePointer2, CircleDashed, Link2, Target, Microscope, ScanSearch,
-  Play, Settings2
+  Play, Settings2, FileText, Trash2
 } from 'lucide-react';
 
 /**
- * BioLens Agent Pro - Manual Form Edition
- * 1. Removed LLM dependency for commands.
- * 2. Added Structured Form Builder for precise control.
- * 3. executeCommand logic remains the core driver.
+ * BioLens Pro - Direct Execution Edition
+ * 1. Bypasses React 'useEffect' sync loops for coloring.
+ * 2. Directly calls Mol* builders when "Run" is clicked.
+ * 3. Includes "Structure Inspector" to debug PDB data.
  */
 
-// --- 1. Static Configuration (保持不变) ---
+// --- 1. Static Configuration ---
 const loadMolstarResources = () => {
   return new Promise((resolve, reject) => {
     if (typeof window === 'undefined') { resolve(); return; }
@@ -35,39 +35,14 @@ const loadMolstarResources = () => {
   });
 };
 
-const clamp01 = (v) => Math.max(0, Math.min(1, Number(v)));
-const isHexColor = (s) => typeof s === 'string' && /^#[0-9a-fA-F]{6}$/.test(s.trim());
 const hexToInt = (hex) => {
   try {
     if (!hex || typeof hex !== 'string') return 0xff0000;
     return parseInt(hex.replace('#', ''), 16) || 0xff0000;
-  } catch {
-    return 0xff0000;
-  }
-};
-const mkId = () => `ov_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-
-const STYLES = {
-  cartoon: { label: 'Cartoon', type: 'cartoon', param: { alpha: 1 } },
-  surface: { label: 'Surface', type: 'molecular-surface', param: { alpha: 0.9, quality: 'auto' } },
-  bns: { label: 'Ball & Stick', type: 'ball-and-stick', param: { sizeFactor: 0.2 } },
-  spacefill: { label: 'Spacefill', type: 'spacefill', param: {} },
+  } catch { return 0xff0000; }
 };
 
-const JOURNAL_PRESETS = {
-  default: { label: 'Standard', bgColor: 0xf8f9fa, style: 'cartoon', color: 'chain', lighting: 'flat' },
-  nature: { label: 'Nature (Paper)', bgColor: 0xffffff, style: 'cartoon', color: 'chain', lighting: 'occlusion', param: { alpha: 1.0 } },
-  dark: { label: 'Dark (Pymol)', bgColor: 0x000000, style: 'cartoon', color: 'element', lighting: 'plastic' },
-  hologram: { label: 'Hologram (Cyber)', bgColor: 0x000000, style: 'bns', color: 'uniform', customColor: 0x00ffcc, lighting: 'flat' }
-};
-
-const COLORS = {
-  chain: { label: 'By Chain', type: 'chain-id' },
-  element: { label: 'By Element', type: 'element-symbol' },
-  hydro: { label: 'Hydrophobicity', type: 'hydrophobicity' },
-  rainbow: { label: 'Rainbow', type: 'sequence-id' },
-  uniform: { label: 'Uniform', type: 'uniform' }
-};
+const mkId = () => `layer_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
 
 // --- 2. Main Component ---
 const BioLensApp = () => {
@@ -82,37 +57,22 @@ const BioLensApp = () => {
   const [fileName, setFileName] = useState('4HHB');
   const [toast, setToast] = useState(null);
 
-  // Visuals
-  const [activePreset, setActivePreset] = useState('default');
-  const [activeStyle, setActiveStyle] = useState('cartoon');
-  const [activeColorMode, setActiveColorMode] = useState('chain');
-  const [customColor, setCustomColor] = useState('#4f46e5');
-  const [showWater, setShowWater] = useState(false);
-  const [showLigands, setShowLigands] = useState(true);
-  const [polymerOpacity, setPolymerOpacity] = useState(1.0);
-  const [ligandOpacity, setLigandOpacity] = useState(1.0);
-  const [waterOpacity, setWaterOpacity] = useState(0.4);
-
-  // Interaction
-  const [clickMode, setClickMode] = useState('pick');
-  const [agentOverlays, setAgentOverlays] = useState([]);
-  const [spinState, setSpinState] = useState({ enabled: false, speed: 1.0 });
-
-  // Logs (Formerly Chat)
+  // Logs
   const [messages, setMessages] = useState([
-    { role: 'system', content: 'Ready. 请在下方填写参数并执行指令。' }
+    { role: 'system', content: 'Ready. 直接模式：指令将立即发送给 Mol* 内核。' }
   ]);
+  
+  // Track created layers (just for UI list, not for driving render)
+  const [layers, setLayers] = useState([]);
 
-  // --- NEW: Manual Form State (新：表单状态) ---
+  // Form State
   const [formState, setFormState] = useState({
-    action: 'color',       // color, focus, label, highlight
-    targetType: 'residue', // residue, chain, ligand, all
+    action: 'color',       
+    targetType: 'residue', 
     chainVal: 'A',
-    resIdVal: '',          // Start residue or single residue
-    resEndVal: '',         // End residue (for range)
-    ligandName: '',
+    resIdVal: '',          
+    resEndVal: '',         
     colorVal: '#ff0000',
-    opacityVal: 0.5
   });
 
   // Helpers
@@ -120,29 +80,10 @@ const BioLensApp = () => {
     setToast(msg);
     setTimeout(() => setToast(null), 3000);
   };
-
-  const pushSystemLog = useCallback((text) => {
-    setMessages((prev) => [...prev, { role: 'system', content: `[UI] ${text}` }]);
-  }, []);
-
+  
   const getPlugin = useCallback(() => viewerRef.current?.plugin, []);
 
-  // ... (Keep getCurrentStructureWrapper, getStructureData, loadMolstarResources logic same as before) ...
-  const getCurrentStructureWrapper = useCallback((plugin) => {
-    try { return plugin?.managers?.structure?.hierarchy?.current?.structures?.[0] || null; } catch { return null; }
-  }, []);
-
-  const getStructureData = useCallback((plugin) => {
-    try {
-      const sw = getCurrentStructureWrapper(plugin);
-      return sw?.cell?.obj?.data || null;
-    } catch {
-      return null;
-    }
-  }, [getCurrentStructureWrapper]);
-
-
-  // --- Init & Hooks (Keep unchanged) ---
+  // --- Init ---
   useEffect(() => {
     const init = async () => {
       try {
@@ -164,290 +105,189 @@ const BioLensApp = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- Click Listener (Keep unchanged) ---
-  useEffect(() => {
-    if (loading) return;
-    const plugin = getPlugin();
-    if (!plugin) return;
-
-    const clickSub = plugin.behaviors.interaction.click.subscribe(async (e) => {
-      if (clickMode === 'pick') return;
-      const currentLoci = e.current.loci;
-      const MS = window.molstar?.MolScriptBuilder;
-      if (MS && currentLoci.kind === 'element-loci' && currentLoci.elements.length > 0) {
-        try {
-          const structure = currentLoci.structure;
-          const unit = currentLoci.elements[0].unit;
-          const index = currentLoci.elements[0].indices[0];
-          const SP = window.molstar.StructureProperties;
-          const SE = window.molstar.StructureElement;
-          if (SP && SE) {
-            const loc = SE.Location.create(structure, unit, index);
-            const seqId = SP.residue.auth_seq_id(loc);
-            const chainId = SP.chain.auth_asym_id(loc);
-            const resName = SP.residue.label_comp_id(loc);
-            
-            let newOverlay = null;
-            let feedbackMsg = '';
-            const id = mkId();
-
-            if (clickMode === 'zone5') {
-              newOverlay = { id, type: 'zone', target: `${seqId}`, targetChain: chainId, radius: 5, color: '#ff0055', rawSeqId: seqId };
-              feedbackMsg = `Zone 5Å: Residue ${resName} ${seqId} (Chain ${chainId})`;
-            } else if (clickMode === 'hbond') {
-              newOverlay = { id, type: 'residue', target: `${seqId}-${seqId}`, targetChain: chainId, interaction: true, color: '#ffff00', style: 'ball-and-stick' };
-              feedbackMsg = `H-Bonds: Residue ${resName} ${seqId} (Chain ${chainId})`;
-            }
-
-            if (newOverlay) {
-              setAgentOverlays((prev) => [...prev, newOverlay]);
-              showToastMsg(feedbackMsg);
-              setMessages((prev) => [...prev, { role: 'system', content: `[Click] ${feedbackMsg}` }]);
-            }
-          }
-        } catch (err) { console.warn('Click error:', err); }
-      }
-    });
-    return () => clickSub.unsubscribe();
-  }, [clickMode, loading, getPlugin]);
-
-  // --- Sync Visuals (Keep the robust version) ---
-  const syncVisuals = useCallback(async () => {
-    const plugin = getPlugin();
-    if (!plugin) return;
-    const hierarchy = plugin.managers?.structure?.hierarchy?.current;
-    if (!hierarchy?.structures?.length) return;
-
-    try {
-      await plugin.dataTransaction(async () => {
-        const structure = hierarchy.structures[0];
-        const state = plugin.state.data;
-        const hasSel = (sel) => {
-          const ref = sel?.cell?.transform?.ref ?? sel?.ref;
-          return !!ref && state.cells.has(ref);
-        };
-        if (!structure || !structure.cell) return;
-
-        // 1. Env (Simplified)
-        const canvas = plugin.canvas3d;
-        const preset = JOURNAL_PRESETS[activePreset] || JOURNAL_PRESETS.default;
-        if (canvas && preset) {
-           // ... (Same as previous code)
-           const rendererProps = { backgroundColor: preset.bgColor };
-           const postProps = { occlusion: { name: 'off', params: {} }, outline: { name: 'off', params: {} } };
-           if (preset.lighting === 'occlusion') postProps.occlusion = { name: 'on', params: { samples: 32, radius: 5, bias: 0.8 } };
-           canvas.setProps({ renderer: rendererProps, postProcessing: postProps });
-        }
-
-        // 2. Clean
-        const currentComponents = structure.components;
-        const componentsToDelete = [];
-        for (const c of currentComponents) {
-          if (c.cell && state.cells.has(c.cell.transform.ref)) componentsToDelete.push(c);
-        }
-        if (componentsToDelete.length > 0) await plugin.managers.structure.hierarchy.remove(componentsToDelete);
-
-        // 3. Polymer Base
-        const polymerComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'polymer');
-        if (polymerComp && hasSel(polymerComp)) {
-           let colorProps = { name: COLORS[activeColorMode]?.type || 'chain-id' };
-           if (activeColorMode === 'uniform') colorProps = { name: 'uniform', params: { value: hexToInt(customColor) } };
-           const styleConfig = STYLES[activeStyle] || STYLES.cartoon;
-           await plugin.builders.structure.representation.addRepresentation(polymerComp, {
-             type: styleConfig.type, typeParams: { ...(styleConfig.param || {}), alpha: clamp01(polymerOpacity) },
-             color: colorProps.name, colorParams: colorProps.params,
-           });
-        }
-        
-        // 4. Ligands/Water
-        if (showLigands) {
-           const ligandComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'ligand');
-           if (ligandComp && hasSel(ligandComp)) await plugin.builders.structure.representation.addRepresentation(ligandComp, { type: 'ball-and-stick', color: 'element-symbol', typeParams: { alpha: clamp01(ligandOpacity) } });
-        }
-        if (showWater) {
-           const waterComp = await plugin.builders.structure.tryCreateComponentStatic(structure.cell, 'water');
-           if (waterComp && hasSel(waterComp)) await plugin.builders.structure.representation.addRepresentation(waterComp, { type: 'ball-and-stick', color: 'uniform', colorParams: { value: 0x88ccff }, typeParams: { alpha: clamp01(waterOpacity) } });
-        }
-
-        // 5. Overlays
-        const MS = window.molstar?.MolScriptBuilder;
-        if (!MS) return;
-
-        for (const overlay of agentOverlays) {
-           try {
-             let expression = null;
-             const chainTest = overlay.targetChain ? MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), overlay.targetChain]) : null;
-
-             if (overlay.type === 'residue') {
-                const parts = String(overlay.target).split('-');
-                const start = Number(parts[0]);
-                const end = parts.length > 1 ? Number(parts[1]) : start;
-                if (!isNaN(start)) {
-                   const conditions = [
-                     MS.core.rel.gr([MS.struct.atomProperty.macromolecular.auth_seq_id(), start - 1]),
-                     MS.core.rel.lt([MS.struct.atomProperty.macromolecular.auth_seq_id(), end + 1])
-                   ];
-                   if (chainTest) conditions.push(chainTest);
-                   expression = MS.struct.generator.atomGroups({ 'residue-test': MS.core.logic.and(conditions) });
-                }
-             } else if (overlay.type === 'chain') {
-                expression = MS.struct.generator.atomGroups({ 'chain-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), overlay.target]) });
-             } else if (overlay.type === 'ligand') {
-                const resName = String(overlay.resName || '').trim().toUpperCase();
-                const compIdFn = MS.struct.atomProperty?.macromolecular?.label_comp_id;
-                const entityTest = MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'non-polymer']);
-                if (resName && compIdFn) expression = MS.struct.generator.atomGroups({ 'entity-test': entityTest, 'resname-test': MS.core.rel.eq([compIdFn(), resName]) });
-                else expression = MS.struct.generator.atomGroups({ 'entity-test': entityTest });
-             } 
-             // ... other types (zone, global-hbond) omitted for brevity but should be kept from previous version ...
-             
-             if (!expression) continue;
-             const selComp = await plugin.builders.structure.tryCreateComponentFromExpression(structure.cell, expression, overlay.id, { label: overlay.label || 'Overlay' });
-             if (!selComp || !hasSel(selComp)) continue;
-
-             const colorVal = hexToInt(overlay.color);
-             await plugin.builders.structure.representation.addRepresentation(selComp, {
-               type: 'ball-and-stick', color: 'uniform', colorParams: { value: colorVal },
-               typeParams: { sizeFactor: 0.35, alpha: clamp01(overlay.alpha ?? 1.0) }
-             });
-           } catch(e) { console.error(e); }
-        }
-      });
-    } catch (e) { console.error(e); }
-  }, [activePreset, activeStyle, activeColorMode, customColor, showWater, showLigands, polymerOpacity, ligandOpacity, waterOpacity, agentOverlays, getPlugin]);
-
-  useEffect(() => { if (!loading) syncVisuals(); }, [syncVisuals, loading]);
-
-  // --- Handlers ---
+  // --- Core: Load PDB ---
   const handleFetchPdb = async (id) => {
     const plugin = getPlugin(); if (!plugin || !id) return;
-    setLoading(true); setAgentOverlays([]);
+    setLoading(true); setLayers([]); // Clear UI layers list
     try {
       await plugin.clear();
       const data = await plugin.builders.data.download({ url: `https://files.rcsb.org/download/${id.toUpperCase()}.pdb`, isBinary: false });
       const traj = await plugin.builders.structure.parseTrajectory(data, 'pdb');
       const model = await plugin.builders.structure.createModel(traj);
-      await plugin.builders.structure.createStructure(model);
-      setFileName(id.toUpperCase()); setLoading(false);
+      const structure = await plugin.builders.structure.createStructure(model);
+      
+      // Create default Cartoon representation
+      const polymer = await plugin.builders.structure.tryCreateComponentStatic(structure, 'polymer');
+      if (polymer) await plugin.builders.structure.representation.addRepresentation(polymer, { type: 'cartoon', color: 'chain-id' });
+      
+      const ligand = await plugin.builders.structure.tryCreateComponentStatic(structure, 'ligand');
+      if (ligand) await plugin.builders.structure.representation.addRepresentation(ligand, { type: 'ball-and-stick', color: 'element-symbol' });
+
+      setFileName(id.toUpperCase()); 
+      setLoading(false);
+      showToastMsg(`Loaded ${id}`);
     } catch { setError('Fetch failed'); setLoading(false); }
   };
-  
-  const handleFileUpload = (e) => { /* Keep same logic */ };
 
-  // --- 3. HELPER: Build Overlay (Logic Only) ---
-  const buildOverlayFromTarget = (target, color, extra = {}) => {
-    const t = target?.type;
-    const chain = target?.chain ? String(target.chain).trim().toUpperCase() : null;
-    const id = mkId();
+  // --- DEBUG: Inspect Structure ---
+  const inspectStructure = () => {
+    const plugin = getPlugin();
+    if (!plugin) return;
+    const structure = plugin.managers.structure.hierarchy.current.structures[0]?.cell?.obj?.data;
+    if (!structure) {
+        showToastMsg("没有加载结构");
+        return;
+    }
 
-    if (t === 'residue') {
-      const resId = Number(target.resId);
-      if (!isNaN(resId)) {
-        return { id, type: 'residue', target: `${resId}-${resId}`, targetChain: chain, color, ...extra };
-      }
-    }
-    if (t === 'range') {
-        const a = Number(target.startResId);
-        const b = Number(target.endResId);
-        if(!isNaN(a) && !isNaN(b)) {
-            return { id, type: 'residue', target: `${a}-${b}`, targetChain: chain, color, ...extra };
-        }
-    }
-    if (t === 'chain' && chain) return { id, type: 'chain', target: chain, color, ...extra };
-    if (t === 'ligand') return { id, type: 'ligand', resName: String(target?.resName).toUpperCase(), color, ...extra };
-    return null;
+    console.group("🧪 Structure Inspection");
+    const { units } = structure;
+    const stats = {};
+    
+    units.forEach(u => {
+        const chainId = u.unitVariant ? u.unitVariant : u.model.atomicHierarchy.chains.auth_asym_id.value(u.chainIndex);
+        if (!stats[chainId]) stats[chainId] = { min: 99999, max: -99999, count: 0 };
+        
+        const residueIndex = u.model.atomicHierarchy.residueAtomSegments.index(u.elements[0]);
+        const resId = u.model.atomicHierarchy.residues.auth_seq_id.value(residueIndex);
+        
+        // This is a rough check, iterating atoms is expensive, just checking first/last of units
+        stats[chainId].count++; 
+    });
+    
+    // Better way: use Model Server query or just simple prompt
+    const info = `结构已加载。请在 Console 查看详细信息 (F12)。\n简单检查: 尝试操作 'polymer' 或 'ligand'。`;
+    console.log("Structure Object:", structure);
+    console.log("Tip: Check `structure.model.atomicHierarchy` for exact auth_seq_ids.");
+    console.groupEnd();
+    
+    setMessages(prev => [...prev, { role: 'system', content: "已在控制台打印结构信息。请检查链名称是否为 A, B 等。" }]);
   };
-  
-  // --- 4. EXECUTE COMMAND (Core Engine) ---
-  const executeCommand = async (cmd) => {
-    const action = cmd?.action;
-    const params = cmd?.params || {};
+
+  // --- DIRECT ACTION: Apply Color Immediately ---
+  const applyColorDirectly = async () => {
+    const plugin = getPlugin();
+    if (!plugin) return;
+
+    const { action, targetType, chainVal, resIdVal, resEndVal, colorVal } = formState;
+    const MS = window.molstar.MolScriptBuilder;
+    
+    // 1. Get Root Structure
+    const rootStruct = plugin.managers.structure.hierarchy.current.structures[0];
+    if (!rootStruct) { showToastMsg("未加载结构"); return; }
+
+    // 2. Build Expression (The "Query")
+    let expression = null;
+    const chain = chainVal ? chainVal.trim() : ""; 
+    const chainTest = chain ? MS.core.rel.eq([MS.struct.atomProperty.macromolecular.auth_asym_id(), chain]) : null;
+
+    console.log(`[Direct] Building Query: Type=${targetType}, Chain=${chain}, Res=${resIdVal}`);
+
+    if (targetType === 'residue') {
+        const start = parseInt(resIdVal);
+        const end = resEndVal ? parseInt(resEndVal) : start;
+        
+        if (isNaN(start)) { showToastMsg("请输入有效的残基编号 (数字)"); return; }
+
+        const conditions = [
+            MS.core.rel.gr([MS.struct.atomProperty.macromolecular.auth_seq_id(), start - 1]),
+            MS.core.rel.lt([MS.struct.atomProperty.macromolecular.auth_seq_id(), end + 1])
+        ];
+        if (chainTest) conditions.push(chainTest);
+        
+        expression = MS.struct.generator.atomGroups({
+            'residue-test': MS.core.logic.and(conditions)
+        });
+    } else if (targetType === 'chain') {
+        if (!chain) { showToastMsg("请输入链ID"); return; }
+        expression = MS.struct.generator.atomGroups({
+            'chain-test': chainTest
+        });
+    } else if (targetType === 'ligand') {
+        expression = MS.struct.generator.atomGroups({
+            'entity-test': MS.core.rel.eq([MS.struct.atomProperty.macromolecular.entityType(), 'non-polymer'])
+        });
+    } else if (targetType === 'all') {
+        expression = MS.struct.generator.all();
+    }
+
+    if (!expression) { showToastMsg("查询构建失败"); return; }
 
     try {
-      if (action === 'color' || action === 'highlight' || action === 'label') {
-        const target = params?.target;
-        const color = params?.color || '#ffff00';
-        const label = action === 'label' ? 'Manual:Label' : (action === 'highlight' ? 'Manual:HL' : 'Manual:Color');
+        // 3. Create Component (Selection) -> This creates a "Sub-structure"
+        // Using a random tag to ensure it's a new unique layer
+        const layerId = mkId();
+        const label = `${action} ${targetType} ${chain}:${resIdVal}`;
+
+        const component = await plugin.builders.structure.tryCreateComponentFromExpression(
+            rootStruct.cell, 
+            expression, 
+            layerId, 
+            { label: label }
+        );
+
+        // CHECK: Did we select anything?
+        if (!component) {
+            showToastMsg("⚠️ 未选中任何原子 (检查链/残基号)");
+            setMessages(prev => [...prev, { role: 'system', content: `❌ 未找到: ${chain}链 ${resIdVal}号。请检查 PDB 数据。` }]);
+            return;
+        }
+
+        // 4. Add Representation (The Look)
+        const colorInt = hexToInt(colorVal);
         
-        const ov = buildOverlayFromTarget(target, color, { 
-            style: 'ball-and-stick', 
-            alpha: 1.0, 
-            label 
+        await plugin.builders.structure.representation.addRepresentation(component, {
+            type: 'ball-and-stick', // Always use B&S for manual highlights as it's visible over cartoon
+            color: 'uniform',
+            colorParams: { value: colorInt },
+            typeParams: { sizeFactor: 0.4 } // Make it thick
         });
 
-        if (ov) {
-            setAgentOverlays(prev => [...prev, ov]);
-            return { ok: true, reply: `已执行: ${action} on ${target.type}` };
-        } else {
-            return { ok: false, reply: '目标无效 (缺少参数?)' };
-        }
-      }
-      
-      if (action === 'reset_colors') {
-          setAgentOverlays([]);
-          return { ok: true, reply: '已重置所有图层。' };
-      }
+        // 5. Update UI
+        setLayers(prev => [...prev, { id: layerId, label }]);
+        setMessages(prev => [...prev, { role: 'user', content: `[Direct] Applied ${label}` }]);
+        showToastMsg("✅ 已应用更改");
 
-      if (action === 'focus') {
-          // Simplification for manual focus
-          const plugin = getPlugin();
-          if(plugin) plugin.managers.camera.reset(); // Just reset for now or implement robust focus logic
-          return { ok: true, reply: '已重置视角' };
-      }
-    } catch(e) {
-        return { ok: false, reply: '执行出错: ' + e.message };
+    } catch (err) {
+        console.error("Direct apply failed:", err);
+        showToastMsg("执行错误: " + err.message);
     }
-    return { ok: false, reply: '未知指令' };
   };
 
-  // --- 5. NEW: Handle Manual Form Submit ---
-  const handleManualSubmit = () => {
-    const { action, targetType, chainVal, resIdVal, resEndVal, ligandName, colorVal } = formState;
+  // --- Clear All Custom Layers ---
+  const clearLayers = async () => {
+    const plugin = getPlugin();
+    if (!plugin) return;
     
-    // Construct Target Object based on type
-    let target = { type: targetType };
+    // We remove components by the tags we created
+    // But easier method: Remove everything that is not "polymer" or "ligand" (base)
+    // For this simple version, let's just reload the PDB structure components or remove specifically.
     
-    if (targetType === 'residue') {
-        if (!resIdVal) { showToastMsg('请输入残基编号'); return; }
-        if (resEndVal) {
-            target.type = 'range';
-            target.chain = chainVal;
-            target.startResId = resIdVal;
-            target.endResId = resEndVal;
-        } else {
-            target.chain = chainVal;
-            target.resId = resIdVal;
-        }
-    } else if (targetType === 'chain') {
-        if (!chainVal) { showToastMsg('请输入链ID'); return; }
-        target.chain = chainVal;
-    } else if (targetType === 'ligand') {
-        target.resName = ligandName;
-    } else if (targetType === 'all') {
-        target.type = 'all';
-    }
-
-    // Build Command
-    const cmd = {
-        action: action, // color, focus, highlight
-        params: {
-            target: target,
-            color: colorVal
-        }
-    };
-
-    // Log & Execute
-    setMessages(prev => [...prev, { role: 'user', content: `[Manual] ${action} ${targetType} ${chainVal}:${resIdVal}` }]);
+    // Simplest approach: Remove the components we tracked
+    const hierarchy = plugin.managers.structure.hierarchy.current;
+    const toRemove = [];
     
-    executeCommand(cmd).then(res => {
-        showToastMsg(res.reply);
-        setMessages(prev => [...prev, { role: 'system', content: res.reply }]);
+    hierarchy.structures.forEach(s => {
+        s.components.forEach(c => {
+             // If the key starts with 'layer_', it's ours
+             if (c.key && c.key.startsWith('layer_')) {
+                 toRemove.push(c);
+             }
+        });
     });
+
+    if (toRemove.length > 0) {
+        await plugin.managers.structure.hierarchy.remove(toRemove);
+        setLayers([]);
+        showToastMsg("已清理所有图层");
+    } else {
+        showToastMsg("没有可清理的图层");
+    }
   };
 
   // --- RENDER ---
   return (
     <div className="flex flex-col h-screen w-full bg-slate-50 text-slate-800 font-sans overflow-hidden">
+      {/* Toast */}
       {toast && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 bg-slate-800/90 text-white px-4 py-2 rounded-full shadow-xl flex items-center gap-2 animate-fade-in-up transition-all pointer-events-none">
           <Sparkles size={14} className="text-yellow-400" />
@@ -455,16 +295,16 @@ const BioLensApp = () => {
         </div>
       )}
 
-      {/* Header (Simplified) */}
+      {/* Header */}
       <header className="h-14 bg-white border-b flex items-center justify-between px-4 shadow-sm z-20">
         <div className="flex items-center gap-2">
           <div className="bg-indigo-600 p-1.5 rounded text-white"><Cpu size={18} /></div>
-          <h1 className="font-bold text-lg tracking-tight">BioLens <span className="text-indigo-600">Form</span></h1>
+          <h1 className="font-bold text-lg tracking-tight">BioLens <span className="text-indigo-600">Direct</span></h1>
         </div>
         <div className="flex items-center gap-2">
             <input className="bg-slate-100 border-none outline-none text-sm w-24 px-2 py-1.5 uppercase rounded" 
                    value={pdbId} onChange={(e) => setPdbId(e.target.value)} placeholder="PDB ID" />
-            <button onClick={() => handleFetchPdb(pdbId)} className="btn-secondary">Load</button>
+            <button onClick={() => handleFetchPdb(pdbId)} className="btn-secondary px-3 py-1.5 bg-slate-200 rounded text-xs font-bold">Load</button>
         </div>
       </header>
 
@@ -475,18 +315,23 @@ const BioLensApp = () => {
           <div className="absolute top-4 left-4 z-10">
               <div className="bg-white/90 px-3 py-1 rounded shadow font-bold text-xs">ID: {fileName}</div>
           </div>
-          {agentOverlays.length > 0 && (
-            <button onClick={() => setAgentOverlays([])} className="absolute top-4 right-4 z-10 bg-red-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold">
-                Clear Layers ({agentOverlays.length})
+          <div className="absolute top-4 right-4 z-10 flex flex-col gap-2">
+            {layers.length > 0 && (
+                <button onClick={clearLayers} className="bg-red-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold flex items-center gap-1">
+                    <Trash2 size={12} /> Clear ({layers.length})
+                </button>
+            )}
+             <button onClick={inspectStructure} className="bg-slate-700 text-white px-3 py-1.5 rounded shadow text-xs font-bold flex items-center gap-1">
+                <FileText size={12} /> Check Struct
             </button>
-          )}
+          </div>
         </main>
 
         {/* Sidebar */}
         <aside className="w-80 bg-white border-l flex flex-col z-20 shadow-xl">
           <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
              {/* Log Area */}
-             <div className="bg-slate-50 p-3 rounded-lg border h-48 overflow-y-auto mb-4 text-xs font-mono space-y-1">
+             <div className="bg-slate-50 p-3 rounded-lg border h-32 overflow-y-auto mb-4 text-xs font-mono space-y-1">
                 {messages.map((m, i) => (
                     <div key={i} className={m.role === 'user' ? 'text-indigo-600' : 'text-slate-600'}>
                         {m.role === 'user' ? '>' : '#'} {m.content}
@@ -497,18 +342,16 @@ const BioLensApp = () => {
 
              <section>
                <div className="flex items-center gap-2 mb-3 text-indigo-600 font-bold text-xs uppercase tracking-wider">
-                   <Settings2 size={14} /> 指令构建器 (Builder)
+                   <Settings2 size={14} /> 直接控制 (Direct Control)
                </div>
                
                <div className="space-y-3 p-3 bg-slate-50 rounded-xl border border-indigo-100">
-                  {/* 1. Action */}
+                  {/* Action Row */}
                   <div className="grid grid-cols-2 gap-2">
-                      <label className="text-[10px] text-slate-500 uppercase font-bold">Action</label>
-                      <label className="text-[10px] text-slate-500 uppercase font-bold">Target Type</label>
-                      <select className="input-field" value={formState.action} onChange={e => setFormState({...formState, action: e.target.value})}>
-                          <option value="color">Color (上色)</option>
-                          <option value="highlight">Highlight (高亮)</option>
-                          <option value="focus">Focus (聚焦)</option>
+                      <label className="text-[10px] text-slate-500 uppercase font-bold">Mode</label>
+                      <label className="text-[10px] text-slate-500 uppercase font-bold">Target</label>
+                      <select className="input-field" disabled value="color">
+                          <option value="color">Add Color</option>
                       </select>
                       <select className="input-field" value={formState.targetType} onChange={e => setFormState({...formState, targetType: e.target.value})}>
                           <option value="residue">Residue (残基)</option>
@@ -518,10 +361,10 @@ const BioLensApp = () => {
                       </select>
                   </div>
 
-                  {/* 2. Params based on Target Type */}
+                  {/* Dynamic Inputs */}
                   {formState.targetType === 'chain' && (
                      <div>
-                         <label className="label-text">Chain ID (e.g., A)</label>
+                         <label className="label-text">Chain ID</label>
                          <input className="input-field" value={formState.chainVal} onChange={e => setFormState({...formState, chainVal: e.target.value})} placeholder="A" />
                      </div>
                   )}
@@ -534,7 +377,7 @@ const BioLensApp = () => {
                          </div>
                          <div className="grid grid-cols-2 gap-2">
                              <div>
-                                 <label className="label-text">Residue ID</label>
+                                 <label className="label-text">Residue Start</label>
                                  <input type="number" className="input-field" value={formState.resIdVal} onChange={e => setFormState({...formState, resIdVal: e.target.value})} placeholder="10" />
                              </div>
                              <div>
@@ -545,30 +388,21 @@ const BioLensApp = () => {
                      </div>
                   )}
 
-                  {formState.targetType === 'ligand' && (
-                     <div>
-                         <label className="label-text">Ligand Name (e.g., HEM)</label>
-                         <input className="input-field" value={formState.ligandName} onChange={e => setFormState({...formState, ligandName: e.target.value})} placeholder="HEM" />
-                     </div>
-                  )}
-
-                  {/* 3. Color Picker (Only for color action) */}
-                  {formState.action === 'color' && (
-                      <div className="flex items-center justify-between pt-2 border-t border-slate-200">
-                          <span className="label-text">Pick Color</span>
-                          <div className="flex items-center gap-2">
-                              <span className="text-xs font-mono text-slate-500">{formState.colorVal}</span>
-                              <input type="color" className="w-6 h-6 p-0 border-none bg-transparent cursor-pointer" 
-                                     value={formState.colorVal} onChange={e => setFormState({...formState, colorVal: e.target.value})} />
-                          </div>
+                  {/* Color Picker */}
+                  <div className="flex items-center justify-between pt-2 border-t border-slate-200 mt-2">
+                      <span className="label-text">Pick Color</span>
+                      <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-slate-500">{formState.colorVal}</span>
+                          <input type="color" className="w-6 h-6 p-0 border-none bg-transparent cursor-pointer" 
+                                 value={formState.colorVal} onChange={e => setFormState({...formState, colorVal: e.target.value})} />
                       </div>
-                  )}
+                  </div>
                </div>
 
                {/* Execute Button */}
-               <button onClick={handleManualSubmit} className="mt-4 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md">
+               <button onClick={applyColorDirectly} className="mt-4 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md">
                    <Play size={16} fill="currentColor" />
-                   执行指令 (Run)
+                   执行 (Execute)
                </button>
              </section>
           </div>
@@ -578,7 +412,6 @@ const BioLensApp = () => {
       <style>{`
         .input-field { @apply w-full bg-white border border-slate-300 text-slate-700 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500; }
         .label-text { @apply text-[10px] text-slate-500 font-medium mb-1 block; }
-        .btn-secondary { @apply px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded transition-colors; }
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
         @keyframes fade-in-up { 0% { opacity: 0; transform: translate(-50%, 10px); } 100% { opacity: 1; transform: translate(-50%, 0); } }
